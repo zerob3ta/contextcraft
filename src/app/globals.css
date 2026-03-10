@@ -38,18 +38,34 @@ body {
   border-radius: 2px;
 }
 
-/* News ticker animation */
-@keyframes ticker {
+/* News ticker — constant-speed version driven by JS duration */
+@keyframes ticker-constant {
   0% {
-    transform: translateX(100%);
+    transform: translateX(0);
   }
   100% {
-    transform: translateX(-100%);
+    transform: translateX(-50%);
   }
 }
 
-.animate-ticker {
-  animation: ticker 30s linear infinite;
+/* Breaking banner fade */
+@keyframes banner-fade {
+  0% { opacity: 0; transform: translateY(-100%); }
+  8% { opacity: 1; transform: translateY(0); }
+  85% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-100%); }
+}
+.animate-banner {
+  animation: banner-fade 5s ease-in-out forwards;
+}
+
+/* News item fade-in */
+@keyframes news-fade-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.animate-news-in {
+  animation: news-fade-in 0.3s ease-out;
 }
 
 /* Flash animations */

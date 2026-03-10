@@ -1,0 +1,224 @@
+import type { Building, AgentRole } from "../src/game/config/agents";
+import { ALL_AGENTS } from "../src/game/config/agents";
+
+// ─── News ───
+
+export interface NewsItem {
+  id: string;
+  headline: string;
+  snippet: string;
+  source: string;
+  category: string;
+  timestamp: number;
+  link?: string;
+}
+
+// ─── Markets ───
+
+export interface Market {
+  id: string;
+  question: string;
+  creator: string;
+  fairValue: number | null;
+  spread: number | null;
+  trackingQuery: string | null;
+  createdAt: number;
+  trades: { agentId: string; side: "YES" | "NO"; size: number; price: number; ts: number }[];
+}
+
+// ─── Agent State ───
+
+export interface AgentState {
+  id: string;
+  name: string;
+  role: AgentRole;
+  personality: string;
+  specialty: string;
+  location: Building;
+  lastActionAt: number;
+  lastSpoke: string;
+  cooldownUntil: number;
+}
+
+// ─── Global State ───
+
+class ServerState {
+  agents: Map<string, AgentState> = new Map();
+  markets: Map<string, Market> = new Map();
+  newsBuffer: NewsItem[] = [];
+  seenHeadlines: Set<string> = new Set();
+  eventHistory: { type: string; ts: number; data: unknown }[] = [];
+
+  // Social context — recent speeches and actions for agent-to-agent interaction
+  recentSpeeches: { agentId: string; message: string; ts: number }[] = [];
+  recentActions: { agentId: string; action: string; detail: string; ts: number }[] = [];
+
+  addSpeech(agentId: string, message: string): void {
+    this.recentSpeeches.unshift({ agentId, message, ts: Date.now() });
+    if (this.recentSpeeches.length > 20) this.recentSpeeches.length = 20;
+  }
+
+  addAction(agentId: string, action: string, detail: string): void {
+    this.recentActions.unshift({ agentId, action, detail, ts: Date.now() });
+    if (this.recentActions.length > 20) this.recentActions.length = 20;
+  }
+
+  getAgentsAtLocation(location: string): AgentState[] {
+    return Array.from(this.agents.values()).filter((a) => a.location === location);
+  }
+
+  getRecentSocialContext(limit = 10): string[] {
+    const lines: string[] = [];
+    const cutoff = Date.now() - 2 * 60_000; // last 2 min
+    for (const s of this.recentSpeeches.slice(0, limit)) {
+      if (s.ts < cutoff) break;
+      const agent = this.agents.get(s.agentId);
+      const ago = Math.round((Date.now() - s.ts) / 1000);
+      lines.push(`${agent?.name || s.agentId} said: "${s.message}" (${ago}s ago)`);
+    }
+    for (const a of this.recentActions.slice(0, 5)) {
+      if (a.ts < cutoff) break;
+      const agent = this.agents.get(a.agentId);
+      lines.push(`${agent?.name || a.agentId} ${a.action}: ${a.detail}`);
+    }
+    return lines;
+  }
+
+  // Live data from signal loops (used by agent brains for context)
+  sportsSlate: Array<{ id: string; league: string; shortName: string; homeTeam: string; awayTeam: string; homeScore: number | null; awayScore: number | null; status: string; statusDetail: string; startTime: string; spread: number | null; overUnder: number | null }> = [];
+  liveScores: Array<{ id: string; league: string; shortName: string; homeTeam: string; awayTeam: string; homeScore: number | null; awayScore: number | null; status: string; statusDetail: string; startTime: string }> = [];
+  cryptoPrices: Array<{ id: string; symbol: string; name: string; price: number; change24h: number; marketCap: number }> = [];
+
+  private nextMarketId = 1;
+
+  constructor() {
+    for (const cfg of ALL_AGENTS) {
+      this.agents.set(cfg.id, {
+        id: cfg.id,
+        name: cfg.name,
+        role: cfg.role,
+        personality: cfg.personality,
+        specialty: cfg.specialty,
+        location: "lounge",
+        lastActionAt: 0,
+        lastSpoke: "",
+        cooldownUntil: 0,
+      });
+    }
+  }
+
+  // ── News ──
+
+  addNews(item: Omit<NewsItem, "id" | "timestamp">): NewsItem | null {
+    const key = item.headline.toLowerCase().trim();
+    if (this.seenHeadlines.has(key)) return null;
+
+    // Fuzzy dedup — check word overlap against recent headlines
+    const words = new Set(key.replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean));
+    if (words.size >= 3) {
+      for (const existing of this.newsBuffer.slice(0, 30)) {
+        const eWords = new Set(existing.headline.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean));
+        const overlap = [...words].filter((w) => eWords.has(w)).length;
+        if (overlap / Math.max(words.size, eWords.size) > 0.45) return null;
+      }
+    }
+
+    this.seenHeadlines.add(key);
+
+    const newsItem: NewsItem = {
+      ...item,
+      id: `news-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: Date.now(),
+    };
+    this.newsBuffer.unshift(newsItem);
+    if (this.newsBuffer.length > 50) this.newsBuffer.length = 50;
+    return newsItem;
+  }
+
+  getRecentNews(limit = 15): NewsItem[] {
+    return this.newsBuffer.slice(0, limit);
+  }
+
+  getMarketNews(marketId: string): NewsItem[] {
+    const market = this.markets.get(marketId);
+    if (!market) return [];
+    // Return news tagged for this market's tracking query
+    return this.newsBuffer.filter(
+      (n) => n.category === `market:${marketId}`
+    ).slice(0, 5);
+  }
+
+  // ── Markets ──
+
+  createMarket(question: string, creator: string): Market {
+    const id = `market-${this.nextMarketId++}`;
+    const market: Market = {
+      id,
+      question,
+      creator,
+      fairValue: null,
+      spread: null,
+      trackingQuery: null,
+      createdAt: Date.now(),
+      trades: [],
+    };
+    this.markets.set(id, market);
+    return market;
+  }
+
+  getActiveMarkets(): Market[] {
+    return Array.from(this.markets.values());
+  }
+
+  getUnpricedMarkets(): Market[] {
+    return this.getActiveMarkets().filter((m) => m.fairValue === null);
+  }
+
+  getPricedMarkets(): Market[] {
+    return this.getActiveMarkets().filter((m) => m.fairValue !== null);
+  }
+
+  updatePrice(marketId: string, fairValue: number, spread: number): void {
+    const m = this.markets.get(marketId);
+    if (m) {
+      m.fairValue = Math.max(0.01, Math.min(0.99, fairValue));
+      m.spread = Math.max(0.02, Math.min(0.15, spread));
+    }
+  }
+
+  addTrade(marketId: string, agentId: string, side: "YES" | "NO", size: number, price: number): void {
+    const m = this.markets.get(marketId);
+    if (m) {
+      m.trades.push({ agentId, side, size, price, ts: Date.now() });
+    }
+  }
+
+  // ── Agent ──
+
+  moveAgent(agentId: string, destination: Building): void {
+    const a = this.agents.get(agentId);
+    if (a) a.location = destination;
+  }
+
+  setAgentCooldown(agentId: string, ms: number): void {
+    const a = this.agents.get(agentId);
+    if (a) a.cooldownUntil = Date.now() + ms;
+  }
+
+  // ── Dedup helpers ──
+
+  isDuplicateMarket(question: string): boolean {
+    const norm = question.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+    const words = new Set(norm.split(/\s+/));
+    for (const m of this.markets.values()) {
+      const mNorm = m.question.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+      const mWords = new Set(mNorm.split(/\s+/));
+      const overlap = [...words].filter((w) => mWords.has(w)).length;
+      const similarity = overlap / Math.max(words.size, mWords.size);
+      if (similarity > 0.7) return true;
+    }
+    return false;
+  }
+}
+
+export const state = new ServerState();

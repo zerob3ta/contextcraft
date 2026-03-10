@@ -56,7 +56,7 @@ const ROLE_DOT: Record<AgentRole, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// NewsBar
+// News types & lifecycle
 // ---------------------------------------------------------------------------
 
 interface NewsItem {
@@ -64,88 +64,208 @@ interface NewsItem {
   headline: string;
   source: string;
   severity: "breaking" | "normal";
+  arrivedAt: number;
 }
 
-function NewsBar() {
-  const [items, setItems] = useState<NewsItem[]>([]);
-  const nextId = useRef(0);
+type NewsPhase = "breaking" | "active" | "stale";
 
+function getNewsPhase(item: NewsItem, now: number): NewsPhase {
+  const age = now - item.arrivedAt;
+  if (item.severity === "breaking" && age < 5 * 60_000) return "breaking";
+  if (age < 30 * 60_000) return "active";
+  return "stale";
+}
+
+// ---------------------------------------------------------------------------
+// BreakingTicker — top bar, ONLY breaking news, slow scroll
+// ---------------------------------------------------------------------------
+
+const TICKER_PX_PER_SEC = 40; // constant scroll speed
+
+function BreakingTicker({ items }: { items: NewsItem[] }) {
+  // Show the latest 8 headlines (all types), newest first
+  const recent = items.slice().reverse().slice(0, 8);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [duration, setDuration] = useState(60);
+
+  // Measure content width and compute duration for constant speed
   useEffect(() => {
-    return gameEventBus.on((event) => {
-      if (event.type === "news_alert") {
-        setItems((prev) => {
-          const next = [
-            ...prev,
-            {
-              id: nextId.current++,
-              headline: event.headline,
-              source: event.source,
-              severity: event.severity,
-            },
-          ];
-          // keep last 10
-          return next.slice(-10);
-        });
-      }
+    if (!contentRef.current || recent.length === 0) return;
+    const el = contentRef.current;
+    requestAnimationFrame(() => {
+      const halfWidth = el.scrollWidth / 2;
+      const viewportWidth = el.parentElement?.clientWidth || 1200;
+      const totalTravel = halfWidth + viewportWidth;
+      setDuration(totalTravel / TICKER_PX_PER_SEC);
     });
-  }, []);
+  }, [recent.map((b) => b.id).join(",")]);
 
-  if (items.length === 0) {
+  if (recent.length === 0) {
     return (
-      <div className="h-8 flex items-center justify-center text-[10px] text-white/20 font-pixel tracking-wider">
-        AWAITING NEWS...
+      <div className="h-7 flex items-center justify-center text-[9px] text-white/20 font-pixel tracking-wider">
+        CONTEXTCRAFT
       </div>
     );
   }
 
+  const renderItem = (item: NewsItem, keyPrefix = "") => {
+    const isBreaking = item.severity === "breaking" && Date.now() - item.arrivedAt < 5 * 60_000;
+    return (
+      <span key={`${keyPrefix}${item.id}`} className="inline-flex items-center gap-2 px-6">
+        {isBreaking && (
+          <span className="font-pixel text-[8px] text-red-400 bg-red-400/15 px-1.5 py-0.5 rounded uppercase flex-shrink-0">
+            Breaking
+          </span>
+        )}
+        <span className={`text-[11px] ${isBreaking ? "text-red-300 font-medium" : "text-white/50"}`}>
+          {item.headline}
+        </span>
+        <span className="text-[9px] text-white/25 flex-shrink-0">{item.source}</span>
+      </span>
+    );
+  };
+
   return (
-    <div className="h-8 overflow-hidden relative">
-      <div className="absolute whitespace-nowrap animate-ticker flex items-center h-full gap-12">
-        {items.map((item) => (
-          <span key={item.id} className="inline-flex items-center gap-2">
-            {item.severity === "breaking" && (
-              <span className="font-pixel text-[9px] text-red-400 bg-red-400/15 px-1.5 py-0.5 rounded uppercase">
-                Breaking
-              </span>
-            )}
-            <span
-              className={`text-xs ${
-                item.severity === "breaking"
-                  ? "text-red-300 font-medium"
-                  : "text-white/60"
-              }`}
-            >
-              {item.headline}
-            </span>
-            <span className="text-[10px] text-white/25">{item.source}</span>
-          </span>
-        ))}
-        {/* Duplicate for seamless loop */}
-        {items.map((item) => (
-          <span
-            key={`dup-${item.id}`}
-            className="inline-flex items-center gap-2"
-          >
-            {item.severity === "breaking" && (
-              <span className="font-pixel text-[9px] text-red-400 bg-red-400/15 px-1.5 py-0.5 rounded uppercase">
-                Breaking
-              </span>
-            )}
-            <span
-              className={`text-xs ${
-                item.severity === "breaking"
-                  ? "text-red-300 font-medium"
-                  : "text-white/60"
-              }`}
-            >
-              {item.headline}
-            </span>
-            <span className="text-[10px] text-white/25">{item.source}</span>
-          </span>
-        ))}
+    <div className="h-7 overflow-hidden relative">
+      <div
+        ref={contentRef}
+        className="absolute whitespace-nowrap flex items-center h-full"
+        style={{
+          animation: `ticker-constant ${duration}s linear infinite`,
+        }}
+      >
+        {recent.map((item) => renderItem(item))}
+        {recent.map((item) => renderItem(item, "dup-"))}
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// BreakingBanner — full-width overlay, 5s fade on new breaking news
+// ---------------------------------------------------------------------------
+
+function BreakingBanner({ items }: { items: NewsItem[] }) {
+  const [banner, setBanner] = useState<NewsItem | null>(null);
+  const lastBannerId = useRef(-1);
+
+  useEffect(() => {
+    const latest = items.findLast(
+      (i) => i.severity === "breaking" && Date.now() - i.arrivedAt < 6000
+    );
+    if (latest && latest.id !== lastBannerId.current) {
+      lastBannerId.current = latest.id;
+      setBanner(latest);
+      const t = setTimeout(() => setBanner(null), 5000);
+      return () => clearTimeout(t);
+    }
+  }, [items]);
+
+  if (!banner) return null;
+
+  return (
+    <div className="absolute top-8 left-0 right-0 z-50 pointer-events-none flex justify-center px-4">
+      <div className="animate-banner bg-red-950/90 backdrop-blur-md border border-red-500/30 rounded-lg px-5 py-3 max-w-xl shadow-lg shadow-red-900/30">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="font-pixel text-[8px] text-red-400 uppercase tracking-wider">
+            Breaking News
+          </span>
+          <span className="text-[9px] text-red-400/50">{banner.source}</span>
+        </div>
+        <div className="text-[13px] text-red-100 font-medium leading-snug">
+          {banner.headline}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// NewsFeed — scrollable right-rail feed with lifecycle phases
+// ---------------------------------------------------------------------------
+
+function NewsFeed({ items }: { items: NewsItem[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [now, setNow] = useState(Date.now());
+
+  // Refresh phases every 30s
+  useEffect(() => {
+    const i = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(i);
+  }, []);
+
+  // Auto-scroll to top on new items
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = 0;
+    }
+  }, [items.length]);
+
+  const visible = items.filter((i) => getNewsPhase(i, now) !== "stale");
+
+  return (
+    <div className="space-y-1.5">
+      <div className="font-pixel text-[8px] text-red-400/70 uppercase tracking-widest px-1">
+        News Feed
+      </div>
+      {visible.length === 0 ? (
+        <div className="text-[10px] text-white/20 italic px-1">
+          Awaiting news...
+        </div>
+      ) : (
+        <div
+          ref={scrollRef}
+          className="space-y-1 max-h-[200px] overflow-y-auto hud-scroll"
+        >
+          {visible
+            .slice()
+            .reverse()
+            .map((item) => {
+              const phase = getNewsPhase(item, now);
+              return (
+                <div
+                  key={item.id}
+                  className={`px-2 py-1.5 rounded animate-news-in ${
+                    phase === "breaking"
+                      ? "bg-red-500/10 border border-red-500/20"
+                      : "bg-white/[0.03]"
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    {phase === "breaking" && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse flex-shrink-0" />
+                    )}
+                    <span className="text-[9px] text-white/30">{item.source}</span>
+                    <span className="text-[8px] text-white/15 ml-auto">
+                      {formatAge(item.arrivedAt, now)}
+                    </span>
+                  </div>
+                  <div
+                    className={`text-[11px] leading-snug ${
+                      phase === "breaking"
+                        ? "text-red-200 font-medium"
+                        : phase === "active"
+                        ? "text-white/60"
+                        : "text-white/30"
+                    }`}
+                  >
+                    {item.headline}
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatAge(arrivedAt: number, now: number): string {
+  const sec = Math.floor((now - arrivedAt) / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  return `${Math.floor(min / 60)}h ago`;
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +487,7 @@ function formatTime(ts: number): string {
 export default function HUD() {
   const startTime = useRef(Date.now());
   const nextActivityId = useRef(0);
+  const nextNewsId = useRef(0);
 
   // State
   const [agentLocations, setAgentLocations] = useState<Record<string, string>>(
@@ -379,6 +500,7 @@ export default function HUD() {
   const [activeAgents, setActiveAgents] = useState<Set<string>>(new Set());
   const [markets, setMarkets] = useState<MarketState[]>([]);
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
+  const [newsItems, setNewsItems] = useState<NewsItem[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentConfig | null>(null);
   const [agentSpeeches, setAgentSpeeches] = useState<
     Record<string, SpeechEntry[]>
@@ -541,35 +663,49 @@ export default function HUD() {
         }
 
         case "news_alert": {
-          addActivity(
-            `[${event.source}] ${event.headline}`,
-            event.severity === "breaking" ? "#ef4444" : "#6b7280"
-          );
+          setNewsItems((prev) => {
+            const next = [
+              ...prev,
+              {
+                id: nextNewsId.current++,
+                headline: event.headline,
+                source: event.source,
+                severity: event.severity,
+                arrivedAt: Date.now(),
+              },
+            ];
+            // keep last 30, drop stale (>30min)
+            const cutoff = Date.now() - 30 * 60_000;
+            return next.filter((n) => n.arrivedAt > cutoff).slice(-30);
+          });
+          if (event.severity === "breaking") {
+            addActivity(
+              `[${event.source}] ${event.headline}`,
+              "#ef4444"
+            );
+          }
           break;
         }
       }
     });
 
-    // Demo timeline is started by EventProcessor in PhaserGame.ts
-    // and bridged to gameEventBus via GameCanvas.tsx.
-    // As a fallback (if Phaser hasn't loaded yet), start the bus timeline
-    // after a short delay — it will no-op if already started.
-    const fallbackTimer = setTimeout(() => {
-      gameEventBus.startDemoTimeline();
-    }, 3000);
+    // Demo timeline is managed by GameCanvas — only starts if WS fails.
+    // HUD just listens for events via the bus.
 
     return () => {
-      clearTimeout(fallbackTimer);
       unsub();
     };
   }, [addActivity, elapsed, getAgentColor, getAgentName]);
 
   return (
     <div className="absolute inset-0 pointer-events-none z-10 flex flex-col">
-      {/* Top: News Bar */}
+      {/* Top: Breaking-only ticker */}
       <div className="pointer-events-auto bg-black/60 backdrop-blur-sm border-b border-white/5">
-        <NewsBar />
+        <BreakingTicker items={newsItems} />
       </div>
+
+      {/* Breaking banner overlay */}
+      <BreakingBanner items={newsItems} />
 
       {/* Middle: Sidebars flanking the canvas */}
       <div className="flex-1 flex min-h-0">
@@ -597,9 +733,12 @@ export default function HUD() {
           )}
         </div>
 
-        {/* Right sidebar: Market Board */}
-        <div className="pointer-events-auto w-56 bg-black/50 backdrop-blur-sm border-l border-white/5 p-2 overflow-y-auto hud-scroll hidden lg:block">
-          <MarketBoard markets={markets} />
+        {/* Right sidebar: News Feed + Markets */}
+        <div className="pointer-events-auto w-64 bg-black/50 backdrop-blur-sm border-l border-white/5 p-2 overflow-y-auto hud-scroll hidden lg:block">
+          <div className="space-y-4">
+            <NewsFeed items={newsItems} />
+            <MarketBoard markets={markets} />
+          </div>
         </div>
       </div>
 

@@ -385,9 +385,34 @@ export class TownScene extends Phaser.Scene {
   }
 
   showMarketOnExchange(question: string, price?: number): void {
+    const MAX_VISIBLE = 3;
     const exchange = BUILDINGS.exchange;
-    const yOffset = this.marketDisplays.length * 28;
 
+    // Fade out oldest if at limit
+    while (this.marketDisplays.length >= MAX_VISIBLE) {
+      const old = this.marketDisplays.shift();
+      if (old) {
+        this.tweens.add({
+          targets: old,
+          alpha: 0,
+          duration: 400,
+          ease: "Linear",
+          onComplete: () => old.destroy(),
+        });
+      }
+    }
+
+    // Reposition remaining displays
+    for (let i = 0; i < this.marketDisplays.length; i++) {
+      this.tweens.add({
+        targets: this.marketDisplays[i],
+        y: exchange.y + 20 + i * 28,
+        duration: 200,
+        ease: "Cubic.easeOut",
+      });
+    }
+
+    const yOffset = this.marketDisplays.length * 28;
     const container = this.add.container(
       exchange.x + exchange.width + 16,
       exchange.y + 20 + yOffset
@@ -395,12 +420,15 @@ export class TownScene extends Phaser.Scene {
     container.setDepth(15);
     container.setAlpha(0);
 
+    // Truncate question for on-canvas display
+    const shortQ = question.length > 50 ? question.slice(0, 47) + "..." : question;
+
     const bg = this.add.graphics();
-    const label = this.add.text(8, 4, `${question}`, {
+    const label = this.add.text(8, 4, shortQ, {
       fontSize: "9px",
       fontFamily: "monospace",
       color: "#e2e8f0",
-      wordWrap: { width: 260 },
+      wordWrap: { width: 200 },
     });
 
     const priceText = this.add.text(8, label.height + 8, price ? `${Math.round(price * 100)}c` : "Pricing...", {
@@ -410,7 +438,7 @@ export class TownScene extends Phaser.Scene {
       fontStyle: "bold",
     });
 
-    const w = 280;
+    const w = 220;
     const h = label.height + priceText.height + 16;
 
     bg.fillStyle(0x1e293b, 0.9);
@@ -422,7 +450,6 @@ export class TownScene extends Phaser.Scene {
     container.add(label);
     container.add(priceText);
 
-    // Store marketId reference
     container.setData("question", question);
     this.marketDisplays.push(container);
 

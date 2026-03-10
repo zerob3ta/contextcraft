@@ -48,12 +48,12 @@ export function createPhaserGame(
 
   gameInstance = game;
 
-  // Attach event processor once scene boots
+  // Attach event processor once scene boots — don't start timeline yet,
+  // GameCanvas will start it only if WS connection fails
   game.events.on("ready", () => {
     const scene = game.scene.getScene("TownScene") as TownScene | null;
     if (scene) {
       eventProcessor.attach(scene);
-      eventProcessor.startTimeline();
     }
   });
 

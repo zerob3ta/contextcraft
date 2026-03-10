@@ -46,25 +46,14 @@ export const DEMO_TIMELINE: { delayMs: number; event: GameEvent }[] = [
   // === Agents start in the lounge ===
   // 0s: Everyone is chilling in the lounge
 
-  // 2s: News breaks
+  // 2s: Creators stir
   {
     delayMs: 2000,
     event: {
-      type: "news_alert",
-      headline: "Bitcoin surges past $150K as ETF inflows hit record",
-      source: "CoinDesk",
-      severity: "breaking",
-    },
-  },
-
-  // 3s: Creators react
-  {
-    delayMs: 3000,
-    event: {
       type: "agent_speak",
       agentId: "spark",
-      message: "BTC $150K?! I NEED to make a market on this!!",
-      emotion: "excited",
+      message: "Checking the feeds... anything happening?",
+      emotion: "neutral",
     },
   },
   {
