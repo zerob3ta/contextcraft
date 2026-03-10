@@ -1,0 +1,5 @@
+[phases.build]
+cmds = ["npm ci"]
+
+[start]
+cmd = "npx tsx server/index.ts"
