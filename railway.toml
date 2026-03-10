@@ -3,3 +3,4 @@ builder = "nixpacks"
 
 [deploy]
 startCommand = "npx tsx server/index.ts"
+healthcheckPath = "/"
