@@ -152,9 +152,9 @@ async function syncMarkets(): Promise<void> {
             state.updatePrice(existing.id, fairValue, existing.spread || 0);
             const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
             const dir = newCents > oldCents ? "up" : "down";
-            const headline = `Oracle: "${shortQ}" moved ${dir} to ${newCents}¢ (was ${oldCents}¢)`;
-            state.addNews({ headline, snippet: "", source: "Oracle", category: "Markets" });
-            broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
+            const headline = `Market update: "${shortQ}" moved ${dir} to ${newCents}% (was ${oldCents}%)`;
+            state.addNews({ headline, snippet: "", source: "Market Data", category: "Markets" });
+            broadcast({ type: "news_alert", headline, source: "Market Data", severity: "normal", building: "newsroom" });
             notifyBuildingEvent("newsroom");
             notifyBuildingEvent("exchange");
           }
@@ -259,7 +259,7 @@ async function syncOracleData(): Promise<void> {
           // Emit significant divergence as an exchange/pit signal
           if (Math.abs(market.oracleDivergence) >= 10) {
             const dir = market.oracleDivergence > 0 ? "underpriced" : "overpriced";
-            const headline = `Oracle signal: "${shortQ}" looks ${dir} by ${Math.abs(market.oracleDivergence)}¢ (oracle: ${oraclePct}%, market: ${marketPct}%)`;
+            const headline = `Oracle signal: "${shortQ}" looks ${dir} by ${Math.abs(market.oracleDivergence)}pts (oracle: ${oraclePct}%, market: ${marketPct}%)`;
             state.addNews({ headline, snippet: "", source: "Oracle", category: "Markets" });
             broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
             notifyBuildingEvent("newsroom");

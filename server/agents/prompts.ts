@@ -109,7 +109,7 @@ export function buildUserPrompt(
         if (m.oracleConfidence) oracleTag += ` (${m.oracleConfidence})`;
         if (m.oracleDivergence !== null && Math.abs(m.oracleDivergence) >= 5) {
           const dir = m.oracleDivergence > 0 ? "UNDERPRICED" : "OVERPRICED";
-          oracleTag += ` ⚡${dir} by ${Math.abs(m.oracleDivergence)}¢`;
+          oracleTag += ` ⚡${dir} by ${Math.abs(m.oracleDivergence)}pts`;
         }
       }
 
