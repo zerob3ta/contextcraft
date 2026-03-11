@@ -49,16 +49,18 @@ export function startWsServer(port: number): WebSocketServer {
 /** Strip internal market IDs (M1, M14, etc.) from user-visible text fields */
 function sanitizeMarketIds(event: GameEvent): GameEvent {
   const strip = (s: string) => s.replace(/\bM\d+\b/g, "").replace(/\s{2,}/g, " ").trim();
-  if (event.type === "chat_message") {
-    return { ...event, message: strip(event.message) };
+  switch (event.type) {
+    case "chat_message":
+      return { ...event, message: strip(event.message) };
+    case "agent_speak":
+      return { ...event, message: strip(event.message) };
+    case "chat_directive":
+      return { ...event, directive: strip(event.directive) };
+    case "directive_fulfilled":
+      return { ...event, result: strip(event.result), directive: strip(event.directive) };
+    default:
+      return event;
   }
-  if (event.type === "agent_speak") {
-    return { ...event, message: strip(event.message) };
-  }
-  if (event.type === "directive_fulfilled") {
-    return { ...event, result: strip(event.result) };
-  }
-  return event;
 }
 
 export function broadcast(event: GameEvent): void {

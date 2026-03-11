@@ -202,37 +202,41 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
           const price = action.side === "YES"
             ? market.fairValue + (market.spread || 0.04) / 2
             : 1 - market.fairValue + (market.spread || 0.04) / 2;
-          state.addTrade(action.marketId, agentId, action.side, size, price);
+          const localSize = Math.min(size, 100); // match API cap
+          const cost = Math.round(localSize * price * 100) / 100;
+          state.addTrade(action.marketId, agentId, action.side, localSize, price);
           broadcast({
             type: "trade_executed",
             agentId,
             marketId: action.marketId,
             side: action.side,
-            size,
+            size: localSize,
             price: Math.round(price * 100) / 100,
             building: "pit",
           });
           notifyBuildingEvent("pit");
           const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
-          state.addAction(agentId, `traded ${action.side}`, `$${size} on ${shortQ}`);
+          state.addAction(agentId, `traded ${action.side}`, `$${cost} on ${shortQ}`);
         }
       } else {
         const price = action.side === "YES"
           ? market.fairValue + (market.spread || 0.04) / 2
           : 1 - market.fairValue + (market.spread || 0.04) / 2;
-        state.addTrade(action.marketId, agentId, action.side, size, price);
+        const localSize = Math.min(size, 100);
+        const cost = Math.round(localSize * price * 100) / 100;
+        state.addTrade(action.marketId, agentId, action.side, localSize, price);
         broadcast({
           type: "trade_executed",
           agentId,
           marketId: action.marketId,
           side: action.side,
-          size,
+          size: localSize,
           price: Math.round(price * 100) / 100,
           building: "pit",
         });
         notifyBuildingEvent("pit");
         const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
-        state.addAction(agentId, `traded ${action.side}`, `$${size} on ${shortQ}`);
+        state.addAction(agentId, `traded ${action.side}`, `$${cost} on ${shortQ}`);
       }
 
       state.setAgentCooldown(agentId, 6_000);

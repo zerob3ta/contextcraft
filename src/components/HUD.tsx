@@ -870,7 +870,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
                   ...m.recentActions,
                   {
                     agentName: traderName,
-                    action: `bought ${event.side} $${event.size}`,
+                    action: `bought ${event.side} ${event.size}x at ${Math.round(event.price * 100)}¢`,
                     ts: Date.now(),
                   },
                 ].slice(-4),
@@ -892,13 +892,13 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           // Look up market name for the trade
           setMarkets((currentMarkets) => {
             const market = currentMarkets.find((m) => m.id === event.marketId);
-            const marketQ = market ? market.question : event.marketId;
+            const marketQ = market ? market.question : "a market";
             const shortQ = marketQ.length > 50 ? marketQ.slice(0, 47) + "..." : marketQ;
             addChatMessage({
               type: "activity",
               agentId: event.agentId,
               agentName: traderName,
-              message: `${traderName} bought ${event.side} $${event.size} at ${Math.round(event.price * 100)}¢ on "${shortQ}"`,
+              message: `${traderName} bought ${event.size} ${event.side} at ${Math.round(event.price * 100)}¢ on "${shortQ}"`,
               building: event.building || "pit",
               timestamp: Date.now(),
             });

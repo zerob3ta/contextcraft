@@ -176,12 +176,13 @@ export async function placeTrade(
     });
 
     const price = priceCents / 100;
-    console.log(`[Trading] ${agentId}: ${side} ${size}x at ${priceCents}¢ on ${localMarketId}`);
+    const cost = Math.round(size * price * 100) / 100;
+    console.log(`[Trading] ${agentId}: ${side} ${size} contracts at ${priceCents}¢ ($${cost}) on ${localMarketId}`);
 
     // Update local state
     state.addTrade(localMarketId, agentId, side, size, price);
 
-    // Broadcast
+    // Broadcast — size is contracts, price is decimal
     broadcast({
       type: "trade_executed",
       agentId,
@@ -193,9 +194,9 @@ export async function placeTrade(
     });
     notifyBuildingEvent("pit");
 
-    // Log to social context
+    // Log to social context — show dollar cost, not contract count
     const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
-    state.addAction(agentId, `traded ${side}`, `$${size} on ${shortQ}`);
+    state.addAction(agentId, `traded ${side}`, `$${cost} on ${shortQ}`);
 
     return true;
   } catch (err) {
