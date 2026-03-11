@@ -299,18 +299,38 @@ function detectGameResults(): void {
 
       // Game is finished and matches this market — determine outcome
       const homeWon = (game.homeScore ?? 0) > (game.awayScore ?? 0);
-      const homeTeamLower = game.homeTeam.toLowerCase();
-      const awayTeamLower = game.awayTeam.toLowerCase();
 
       // Figure out which team the market is about (the subject of "Will X beat Y")
-      // Simple heuristic: the first team mentioned in the question
-      const homeIdx = q.indexOf(homeTeamLower);
-      const awayIdx = q.indexOf(awayTeamLower);
+      // Check both full team names and short abbreviations from the shortName
+      const homeTeamLower = game.homeTeam.toLowerCase();
+      const awayTeamLower = game.awayTeam.toLowerCase();
+      // shortName is like "SMU VS LOU" — extract parts as team abbreviations
+      const [awayAbbr, homeAbbr] = shortParts.length >= 2
+        ? [shortParts[0], shortParts[shortParts.length - 1]]
+        : ["", ""];
+
+      // Find first mention position of each team in the question
+      const findFirst = (needles: string[]) => {
+        let best = -1;
+        for (const n of needles) {
+          if (n.length < 3) continue;
+          const idx = q.indexOf(n);
+          if (idx >= 0 && (best === -1 || idx < best)) best = idx;
+        }
+        return best;
+      };
+
+      const homeIdx = findFirst([homeTeamLower, homeAbbr, ...homeTeamLower.split(/\s+/).filter(w => w.length > 3)]);
+      const awayIdx = findFirst([awayTeamLower, awayAbbr, ...awayTeamLower.split(/\s+/).filter(w => w.length > 3)]);
+
+      // The team mentioned first is typically the subject ("Will SMU beat Louisville")
       let subjectIsHome = true;
       if (homeIdx === -1 && awayIdx >= 0) subjectIsHome = false;
+      else if (awayIdx === -1 && homeIdx >= 0) subjectIsHome = true;
       else if (awayIdx >= 0 && homeIdx >= 0) subjectIsHome = homeIdx < awayIdx;
+      else continue; // Can't determine subject team — skip
 
-      // For "beat" markets: YES if subject team won
+      // For "beat"/"win" markets: YES if subject team won
       const subjectWon = subjectIsHome ? homeWon : !homeWon;
       const outcome = subjectWon ? 0 : 1; // 0=YES, 1=NO
 
@@ -323,7 +343,7 @@ function detectGameResults(): void {
       const scoreStr = `${game.awayScore}-${game.homeScore}`;
       const headline = `GAME OVER: ${game.shortName} final ${scoreStr}. "${shortQ}" → ${outcomeStr}. Cancel all orders.`;
 
-      console.log(`[Sync:GameResult] ${market.id} "${shortQ}" → ${outcomeStr} (${game.shortName} ${scoreStr})`);
+      console.log(`[Sync:GameResult] ${market.id} "${shortQ}" → ${outcomeStr} (${game.shortName} ${scoreStr}, subject=${subjectIsHome ? "home" : "away"}, homeWon=${homeWon})`);
 
       state.addNews({ headline, snippet: "", source: "Game Result", category: "Markets" });
       broadcast({ type: "news_alert", headline, source: "Game Result", severity: "breaking", building: "newsroom" });
