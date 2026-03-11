@@ -12,6 +12,8 @@ export class TownScene extends Phaser.Scene {
   private marketDisplays: Phaser.GameObjects.Container[] = [];
   private newsAlertContainer?: Phaser.GameObjects.Container;
   private activeBubbleAgents = new Map<string, { x: number; y: number; expireAt: number }>();
+  private buildingSelectHandler?: (buildingId: string) => void;
+  private selectedBuildingHighlight?: Phaser.GameObjects.Graphics;
 
   constructor() {
     super({ key: "TownScene" });
@@ -208,6 +210,34 @@ export class TownScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 1)
       .setDepth(11);
+
+    // Clickable hit zone for building selection
+    const hitZone = this.add.zone(x + width / 2, y + height / 2, width, height);
+    hitZone.setInteractive({ useHandCursor: true });
+    hitZone.setDepth(13);
+    hitZone.on("pointerdown", () => {
+      this.selectBuilding(config.id);
+    });
+  }
+
+  private selectBuilding(buildingId: RealBuilding): void {
+    // Update highlight
+    if (this.selectedBuildingHighlight) {
+      this.selectedBuildingHighlight.destroy();
+    }
+    const config = BUILDINGS[buildingId];
+    const gfx = this.add.graphics();
+    gfx.setDepth(9);
+    gfx.lineStyle(2, 0xffffff, 0.4);
+    gfx.strokeRoundedRect(config.x - 3, config.y - 3, config.width + 6, config.height + 6, 4);
+    this.selectedBuildingHighlight = gfx;
+
+    // Notify external handler
+    this.buildingSelectHandler?.(buildingId);
+  }
+
+  onBuildingSelect(handler: (buildingId: string) => void): void {
+    this.buildingSelectHandler = handler;
   }
 
   private addBuildingAnimations(): void {

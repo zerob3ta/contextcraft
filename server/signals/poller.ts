@@ -11,6 +11,7 @@ import { fetchOdds } from "./fetchers/odds";
 import { qualityGate, directHeadline } from "./quality-gate";
 import { state, type NewsItem } from "../state";
 import { broadcast } from "../ws-bridge";
+import { notifyBuildingEvent } from "../agents/group-chat";
 
 const timers: ReturnType<typeof setInterval>[] = [];
 const timeouts: ReturnType<typeof setTimeout>[] = [];
@@ -68,7 +69,12 @@ function emitHeadline(headline: string, source: string, category: string, severi
     headline: item.headline,
     source: item.source,
     severity,
+    building: "newsroom",
   });
+
+  // Notify magnetism system so agents are attracted to newsroom
+  notifyBuildingEvent("newsroom");
+
   console.log(`[News:${severity}] ${headline.slice(0, 70)}`);
 
   // Reactive chatter: random agent reacts to breaking news
@@ -91,6 +97,7 @@ function emitHeadline(headline: string, source: string, category: string, severi
         agentId: reactor.id,
         message: msg.slice(0, 90),
         emotion: "excited",
+        building: reactor.location,
       });
     }, 1000 + Math.random() * 3000);
   }

@@ -3,9 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ALL_AGENTS,
-  CREATORS,
-  PRICERS,
-  TRADERS,
   type AgentConfig,
   type AgentRole,
 } from "../game/config/agents";
@@ -51,6 +48,7 @@ interface ChatMsg {
   destination?: string;
   oldMood?: AgentMood;
   newMood?: AgentMood;
+  building?: string; // which building this message belongs to
   timestamp: number;
 }
 
@@ -201,101 +199,126 @@ function formatAge(arrivedAt: number, now: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// AgentRoster
+// Building config for nav
 // ---------------------------------------------------------------------------
 
-function AgentDot({
-  agent,
-  status,
-  active,
-  directive,
-  onClick,
-}: {
-  agent: AgentConfig;
-  status: string;
-  active: boolean;
-  directive?: string;
-  onClick: () => void;
-}) {
-  const hasDirective = !!directive;
+import type { RealBuilding } from "../game/config/agents";
 
-  return (
-    <button
-      onClick={onClick}
-      className={`flex items-center gap-1.5 w-full text-left px-1.5 py-0.5 rounded transition-all hover:bg-white/5 ${
-        active ? "bg-white/5" : ""
-      }`}
-    >
-      <div
-        className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
-          active ? "ring-1 ring-white/40" : ""
-        }`}
-        style={{
-          backgroundColor: agent.color,
-          boxShadow: active ? `0 0 6px ${agent.color}60` : "none",
-        }}
-      />
-      <span
-        className={`text-[10px] truncate ${
-          active ? "text-white/90" : "text-white/50"
-        }`}
-      >
-        {agent.name}
-      </span>
-      {hasDirective ? (
-        <span className="text-[8px] text-cyan-400/70 ml-auto truncate max-w-[70px]" title={directive}>
-          → {status}
-        </span>
-      ) : (
-        <span className="text-[8px] text-white/25 ml-auto truncate max-w-[50px]">
-          {status}
-        </span>
-      )}
-    </button>
-  );
-}
+const BUILDING_NAV: { id: RealBuilding; icon: string; label: string; color: string }[] = [
+  { id: "lounge", icon: "☕", label: "Lounge", color: "#d97706" },
+  { id: "newsroom", icon: "📰", label: "Newsroom", color: "#dc2626" },
+  { id: "workshop", icon: "🔧", label: "Workshop", color: "#7c3aed" },
+  { id: "exchange", icon: "📊", label: "Exchange", color: "#0891b2" },
+  { id: "pit", icon: "🔥", label: "Pit", color: "#ea580c" },
+];
 
-function AgentRoster({
+// ---------------------------------------------------------------------------
+// BuildingNav — left rail organized by building
+// ---------------------------------------------------------------------------
+
+function BuildingNav({
+  activeBuilding,
+  onSelectBuilding,
   agentLocations,
   activeAgents,
   agentDirectives,
+  recentBuildingActivity,
   onSelectAgent,
 }: {
+  activeBuilding: RealBuilding | "all";
+  onSelectBuilding: (b: RealBuilding | "all") => void;
   agentLocations: Record<string, string>;
   activeAgents: Set<string>;
   agentDirectives: Record<string, string>;
+  recentBuildingActivity: Set<string>;
   onSelectAgent: (agent: AgentConfig) => void;
 }) {
-  const groups: { label: string; color: string; agents: AgentConfig[] }[] = [
-    { label: "Creators", color: ROLE_COLORS.creator, agents: CREATORS },
-    { label: "Pricers", color: ROLE_COLORS.pricer, agents: PRICERS },
-    { label: "Traders", color: ROLE_COLORS.trader, agents: TRADERS },
-  ];
+  // Count agents per building
+  const counts: Record<string, number> = {};
+  for (const loc of Object.values(agentLocations)) {
+    counts[loc] = (counts[loc] || 0) + 1;
+  }
+
+  // Get agents at a specific building
+  const agentsAt = (buildingId: string) =>
+    ALL_AGENTS.filter((a) => (agentLocations[a.id] || "lounge") === buildingId);
 
   return (
-    <div className="space-y-2">
-      {groups.map((group) => (
-        <div key={group.label}>
-          <div
-            className="font-pixel text-[8px] uppercase tracking-widest mb-1 px-1.5"
-            style={{ color: group.color }}
-          >
-            {group.label}
+    <div className="flex flex-col gap-1">
+      {/* All feed toggle */}
+      <button
+        onClick={() => onSelectBuilding("all")}
+        className={`flex items-center gap-2 w-full text-left px-2 py-1.5 rounded transition-all ${
+          activeBuilding === "all" ? "bg-white/10" : "hover:bg-white/5"
+        }`}
+      >
+        <span className="text-[12px]">🌐</span>
+        <span className={`text-[10px] font-semibold ${activeBuilding === "all" ? "text-white/90" : "text-white/50"}`}>
+          All
+        </span>
+      </button>
+
+      <div className="h-px bg-white/5 mx-1 my-0.5" />
+
+      {BUILDING_NAV.map((b) => {
+        const count = counts[b.id] || 0;
+        const isActive = activeBuilding === b.id;
+        const hasActivity = recentBuildingActivity.has(b.id);
+
+        return (
+          <div key={b.id}>
+            <button
+              onClick={() => onSelectBuilding(b.id)}
+              className={`flex items-center gap-2 w-full text-left px-2 py-1.5 rounded transition-all ${
+                isActive ? "bg-white/10" : "hover:bg-white/5"
+              }`}
+            >
+              <span className="text-[12px]">{b.icon}</span>
+              <span className={`text-[10px] font-semibold flex-1 ${isActive ? "text-white/90" : "text-white/50"}`}>
+                {b.label}
+              </span>
+              {count > 0 && (
+                <span className={`text-[9px] ${isActive ? "text-white/60" : "text-white/25"}`}>
+                  {count}
+                </span>
+              )}
+              {hasActivity && !isActive && (
+                <div
+                  className="w-1.5 h-1.5 rounded-full animate-pulse"
+                  style={{ backgroundColor: b.color }}
+                />
+              )}
+            </button>
+
+            {/* Always show agents in this building */}
+            {count > 0 && (
+              <div className="pl-6 pr-1 pb-1">
+                {agentsAt(b.id).map((agent) => (
+                  <button
+                    key={agent.id}
+                    onClick={(e) => { e.stopPropagation(); onSelectAgent(agent); }}
+                    className="flex items-center gap-1.5 w-full text-left px-1 py-0.5 rounded hover:bg-white/5"
+                  >
+                    <div
+                      className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                        activeAgents.has(agent.id) ? "ring-1 ring-white/40" : ""
+                      }`}
+                      style={{ backgroundColor: agent.color }}
+                    />
+                    <span className="text-[9px] text-white/50 truncate">{agent.name}</span>
+                    <span className="text-[7px] uppercase text-white/20 ml-auto">{agent.role}</span>
+                    {agentDirectives[agent.id] && (
+                      <span className="text-[7px] text-cyan-400/60 truncate max-w-[50px]">
+                        → {agentDirectives[agent.id].slice(0, 20)}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-          <div className="space-y-0">
-            {group.agents.map((agent) => (
-              <AgentDot
-                key={agent.id}
-                agent={agent}
-                status={agentLocations[agent.id] || "lounge"}
-                active={activeAgents.has(agent.id)}
-                directive={agentDirectives[agent.id]}
-                onClick={() => onSelectAgent(agent)}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -510,46 +533,61 @@ function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: Chat
 
 function ChatStream({
   messages,
-  chattingCount,
+  activeBuilding,
+  agentCountAtBuilding,
 }: {
   messages: ChatMsg[];
-  chattingCount: number;
+  activeBuilding: RealBuilding | "all";
+  agentCountAtBuilding: number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Filter messages by building
+  const filtered = activeBuilding === "all"
+    ? messages
+    : messages.filter((m) => m.building === activeBuilding);
 
   // Always scroll to bottom on new messages
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Use rAF to ensure DOM has rendered
     requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
     });
-  }, [messages.length]);
+  }, [filtered.length]);
+
+  const navItem = BUILDING_NAV.find((b) => b.id === activeBuilding);
+  const headerText = activeBuilding === "all" ? "# all-rooms" : `# ${navItem?.label.toLowerCase() || activeBuilding}`;
+  const headerIcon = activeBuilding === "all" ? "🌐" : navItem?.icon || "";
 
   return (
     <div className="flex flex-col" style={{ height: "100%", minHeight: 0 }}>
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5" style={{ flexShrink: 0 }}>
-        <span className="text-[13px] font-semibold text-[#e8e6e1]"># the-lounge</span>
-        <div className="flex items-center gap-1 ml-auto">
-          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          <span className="text-[9px] text-white/40">{chattingCount} in lounge</span>
-        </div>
+        <span className="text-[13px]">{headerIcon}</span>
+        <span className="text-[13px] font-semibold text-[#e8e6e1]">{headerText}</span>
+        {activeBuilding !== "all" && (
+          <div className="flex items-center gap-1 ml-auto">
+            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span className="text-[9px] text-white/40">{agentCountAtBuilding} here</span>
+          </div>
+        )}
       </div>
 
-      {/* Messages — absolute positioning to guarantee scroll works */}
+      {/* Messages */}
       <div className="relative" style={{ flex: "1 1 0%", minHeight: 0 }}>
         <div
           ref={scrollRef}
           className="absolute inset-0 overflow-y-auto hud-scroll py-1"
         >
-          {messages.length === 0 ? (
+          {filtered.length === 0 ? (
             <div className="text-[10px] text-white/20 italic px-3 pt-4">
-              Agents are gathering in the lounge...
+              {activeBuilding === "all"
+                ? "Agents are warming up..."
+                : `No activity in ${navItem?.label || activeBuilding} yet...`}
             </div>
           ) : (
-            messages.map((msg) => (
+            filtered.map((msg) => (
               <ChatMessageItem key={msg.id} msg={msg} allMessages={messages} />
             ))
           )}
@@ -589,6 +627,10 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
   const [agentMoods, setAgentMoods] = useState<Record<string, AgentMood>>({});
   // Track which agents have been active recently (for "X chatting" count)
   const [chattingAgents, setChattingAgents] = useState<Set<string>>(new Set());
+  // Active building room being viewed
+  const [activeBuilding, setActiveBuilding] = useState<RealBuilding | "all">("all");
+  // Track recent activity per building for nav indicators
+  const [recentBuildingActivity, setRecentBuildingActivity] = useState<Set<string>>(new Set());
 
   const getAgentName = useCallback((agentId: string): string => {
     return ALL_AGENTS.find((a) => a.id === agentId)?.name || agentId;
@@ -606,6 +648,22 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
   const addChatMessage = useCallback((msg: Omit<ChatMsg, "id">) => {
     const id = `chat-${nextChatId.current++}`;
     setChatMessages((prev) => [...prev, { ...msg, id }].slice(-100));
+    // Track building activity for nav pulse indicators
+    if (msg.building) {
+      setRecentBuildingActivity((prev) => {
+        const next = new Set(prev);
+        next.add(msg.building!);
+        return next;
+      });
+      const b = msg.building;
+      setTimeout(() => {
+        setRecentBuildingActivity((prev) => {
+          const next = new Set(prev);
+          next.delete(b);
+          return next;
+        });
+      }, 5_000);
+    }
   }, []);
 
   const markAgentChatting = useCallback((agentId: string) => {
@@ -675,6 +733,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             agentName: getAgentName(event.agentId),
             role: getAgentRole(event.agentId),
             message: event.message,
+            building: (event as { building?: string }).building,
             timestamp: Date.now(),
           });
           break;
@@ -694,6 +753,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             mood: event.mood,
             replyTo: event.replyTo,
             replyPreview: event.replyPreview,
+            building: event.building,
             timestamp: Date.now(),
           });
           break;
@@ -708,6 +768,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             message: `Heading to ${event.destination}`,
             directive: event.directive,
             destination: event.destination,
+            building: event.building,
             timestamp: Date.now(),
           });
           break;
@@ -722,6 +783,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             message: "",
             oldMood: event.oldMood,
             newMood: event.newMood,
+            building: event.building,
             timestamp: Date.now(),
           });
           break;
@@ -750,6 +812,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             agentId: event.creator,
             agentName: creatorName,
             message: `${creatorName} created market: "${event.question}"`,
+            building: event.building || "workshop",
             timestamp: Date.now(),
           });
           break;
@@ -787,6 +850,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
               addChatMessage({
                 type: "activity",
                 message: `"${shortQ}" priced at ${Math.round(event.fairValue * 100)}¢ (spread ${Math.round(event.spread * 100)}¢)`,
+                building: event.building || "exchange",
                 timestamp: Date.now(),
               });
             }
@@ -835,6 +899,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
               agentId: event.agentId,
               agentName: traderName,
               message: `${traderName} bought ${event.side} $${event.size} at ${Math.round(event.price * 100)}¢ on "${shortQ}"`,
+              building: event.building || "pit",
               timestamp: Date.now(),
             });
             return currentMarkets; // no mutation
@@ -863,9 +928,15 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             addChatMessage({
               type: "news",
               message: event.headline,
+              building: "newsroom",
               timestamp: Date.now(),
             });
           }
+          break;
+        }
+
+        case "building_selected": {
+          setActiveBuilding(event.buildingId as RealBuilding);
           break;
         }
 
@@ -898,6 +969,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             agentId: event.agentId,
             agentName: fulfilledAgent?.name || event.agentName,
             message: `${fulfilledAgent?.name || event.agentName} ${event.result}`,
+            building: (event as { building?: string }).building,
             timestamp: Date.now(),
           });
           break;
@@ -919,12 +991,15 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
 
       {/* Main row: left sidebar | canvas | right sidebar — all in flow */}
       <div className="flex-1 flex min-h-0">
-        {/* Left sidebar: Agent Roster */}
+        {/* Left sidebar: Building Nav */}
         <div className="w-44 bg-black/50 backdrop-blur-sm border-r border-white/5 p-2 overflow-y-auto hud-scroll hidden md:block flex-shrink-0">
-          <AgentRoster
+          <BuildingNav
+            activeBuilding={activeBuilding}
+            onSelectBuilding={setActiveBuilding}
             agentLocations={agentLocations}
             activeAgents={activeAgents}
             agentDirectives={agentDirectives}
+            recentBuildingActivity={recentBuildingActivity}
             onSelectAgent={setSelectedAgent}
           />
         </div>
@@ -951,9 +1026,17 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           )}
         </div>
 
-        {/* Right sidebar: #the-lounge group chat */}
+        {/* Right sidebar: Room chat */}
         <div className="w-[576px] bg-[#13161e]/95 backdrop-blur-sm border-l border-white/5 hidden lg:flex flex-col flex-shrink-0">
-          <ChatStream messages={chatMessages} chattingCount={Object.values(agentLocations).filter((l) => l === "lounge").length} />
+          <ChatStream
+            messages={chatMessages}
+            activeBuilding={activeBuilding}
+            agentCountAtBuilding={
+              activeBuilding === "all"
+                ? ALL_AGENTS.length
+                : Object.values(agentLocations).filter((l) => l === activeBuilding).length
+            }
+          />
         </div>
       </div>
     </>

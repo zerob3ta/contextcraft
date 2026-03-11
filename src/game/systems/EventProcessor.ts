@@ -101,6 +101,10 @@ export class EventProcessor {
       case "mood_change":
         this.scene.setAgentMood(event.agentId, event.newMood);
         break;
+
+      case "building_selected":
+        // Handled by HUD only — no Phaser action needed
+        break;
     }
   }
 

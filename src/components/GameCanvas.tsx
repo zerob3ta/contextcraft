@@ -37,6 +37,14 @@ export default function GameCanvas() {
           gameEventBus.emit(event);
         });
 
+        // Bridge building clicks → HUD
+        const scene = handle.getScene();
+        if (scene) {
+          scene.onBuildingSelect((buildingId) => {
+            gameEventBus.emit({ type: "building_selected", buildingId });
+          });
+        }
+
         // Listen for HUD-originated events (e.g. agent_directive) and forward directly to scene
         const unsubBus = gameEventBus.on((event) => {
           const scene = handle.getScene();
@@ -82,6 +90,9 @@ export default function GameCanvas() {
             handle.eventProcessor.attach(scene);
             handle.eventProcessor.onEvent((event) => {
               gameEventBus.emit(event);
+            });
+            scene.onBuildingSelect((buildingId) => {
+              gameEventBus.emit({ type: "building_selected", buildingId });
             });
           }
         };

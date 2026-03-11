@@ -4,7 +4,7 @@ import { callMinimax, parseJsonAction } from "./brain";
 import { buildSystemPrompt, buildUserPrompt } from "./prompts";
 import { validateAction, clampTradeSize, type AgentAction } from "./actions";
 import { draftMarket } from "../market/creator";
-import { runGroupChatTick } from "./group-chat";
+import { runGroupChatTick, notifyBuildingEvent } from "./group-chat";
 import type { AgentState } from "../state";
 
 const TICK_INTERVAL_MS = 8_000; // unified tick every 8s
@@ -105,6 +105,7 @@ async function runJobAgent(agentId: string): Promise<void> {
         agentName: agent.name,
         directive: hadDirective,
         result,
+        building: agent.location,
       });
       agent.directive = null;
       agent.directiveUntil = 0;
@@ -127,7 +128,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
     }
 
     case "speak": {
-      broadcast({ type: "agent_speak", agentId, message: action.message, emotion: action.emotion });
+      broadcast({ type: "agent_speak", agentId, message: action.message, emotion: action.emotion, building: agent.location });
       agent.lastSpoke = action.message;
       state.addSpeech(agentId, action.message);
       break;
@@ -146,7 +147,9 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       broadcast({ type: "agent_move", agentId, destination: "exchange", reason: "Pricing" });
 
       state.updatePrice(action.marketId, action.fairValue, action.spread);
-      broadcast({ type: "price_update", marketId: action.marketId, fairValue: action.fairValue, spread: action.spread });
+      broadcast({ type: "price_update", marketId: action.marketId, fairValue: action.fairValue, spread: action.spread, building: "exchange" });
+      notifyBuildingEvent("exchange");
+      notifyBuildingEvent("pit"); // traders should react to price changes
 
       // Log to social context so other agents can react
       const cents = Math.round(action.fairValue * 100);
@@ -179,7 +182,9 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
         side: action.side,
         size,
         price: Math.round(price * 100) / 100,
+        building: "pit",
       });
+      notifyBuildingEvent("pit");
 
       // Log to social context
       const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
@@ -227,7 +232,9 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
 
   const market = state.createMarket(question, agentId);
   state.lastMarketCreatedAt = Date.now();
-  broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId });
+  broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId, building: "workshop" });
+  notifyBuildingEvent("workshop");
+  notifyBuildingEvent("exchange"); // pricers should react
 
   // Log to social context so other agents react to it
   state.addAction(agentId, "created market", question.slice(0, 60));

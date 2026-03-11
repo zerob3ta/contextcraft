@@ -16,18 +16,21 @@ export type GameEvent =
       agentId: string;
       message: string;
       emotion: Emotion;
+      building?: string;
     }
   | {
       type: "market_spawning";
       marketId: string;
       question: string;
       creator: string;
+      building?: string;
     }
   | {
       type: "price_update";
       marketId: string;
       fairValue: number;
       spread: number;
+      building?: string;
     }
   | {
       type: "trade_executed";
@@ -36,12 +39,14 @@ export type GameEvent =
       side: "YES" | "NO";
       size: number;
       price: number;
+      building?: string;
     }
   | {
       type: "news_alert";
       headline: string;
       source: string;
       severity: "breaking" | "normal";
+      building?: string;
     }
   | {
       type: "chat_message";
@@ -52,7 +57,8 @@ export type GameEvent =
       message: string;
       mood: AgentMood;
       replyTo: string | null;
-      replyPreview: string | null; // "AgentName: truncated message..."
+      replyPreview: string | null;
+      building?: string;
     }
   | {
       type: "chat_directive";
@@ -60,6 +66,7 @@ export type GameEvent =
       agentName: string;
       directive: string;
       destination: string;
+      building?: string;
     }
   | {
       type: "mood_change";
@@ -67,6 +74,11 @@ export type GameEvent =
       agentName: string;
       oldMood: AgentMood;
       newMood: AgentMood;
+      building?: string;
+    }
+  | {
+      type: "building_selected";
+      buildingId: string;
     }
   | {
       type: "agent_directive";
@@ -79,6 +91,7 @@ export type GameEvent =
       agentName: string;
       directive: string;
       result: string;
+      building?: string;
     };
 
 /** Pre-scripted demo timeline — runs on load so the town is alive immediately */

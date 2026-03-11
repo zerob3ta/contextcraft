@@ -22,6 +22,7 @@ export interface ChatMessage {
   message: string;
   mood: AgentMood;
   replyTo: string | null; // message ID being replied to
+  building: string; // which building this message was sent from
   timestamp: number;
 }
 
@@ -49,6 +50,21 @@ const ROLE_WORK_BUILDINGS: Record<string, Building> = {
   trader: "pit",
 };
 
+const BUILDING_DISPLAY_NAMES: Record<string, string> = {
+  lounge: "The Lounge",
+  newsroom: "The Newsroom",
+  workshop: "The Workshop",
+  exchange: "The Exchange",
+  pit: "The Trading Pit",
+};
+
+const BUILDING_CHAT_CONTEXT: Record<string, string> = {
+  newsroom: "Talk about breaking news and its market implications. React to headlines.",
+  workshop: "Discuss which markets should be created. Debate market design and questions.",
+  exchange: "Talk about pricing, fair values, spreads. Debate whether markets are mispriced.",
+  pit: "Talk about trades, positions, and market moves. Trash-talk other traders' positions.",
+};
+
 // ── State ──
 
 let chatLog: ChatMessage[] = [];
@@ -57,6 +73,8 @@ let agentMoods: Map<string, { mood: AgentMood; since: number; ticksSinceReinforc
 let agentConvictions: Map<string, Conviction[]> = new Map();
 let lastSpeakTick: Map<string, number> = new Map(); // agentId -> tick number when they last spoke
 let tickCount = 0;
+// Track agents that recently arrived at a building (for gossip-on-arrival)
+const recentArrivals: Map<string, { from: string; to: string; tick: number }> = new Map();
 
 // ── Public API ──
 
@@ -116,27 +134,18 @@ export async function runGroupChatTick(): Promise<void> {
 
   if (available.length === 0) return;
 
-  // Move idle agents to lounge if they aren't already there
-  for (const a of available) {
-    if (a.location !== "lounge") {
-      state.moveAgent(a.id, "lounge");
-      broadcast({ type: "agent_move", agentId: a.id, destination: "lounge", reason: "Heading to lounge" });
-    }
-  }
+  // Magnetism: attract agents to buildings based on recent events
+  updateAgentMagnetism(available);
 
-  // Only agents in the lounge can chat
-  const inLounge = available.filter((a) => a.location === "lounge");
-  if (inLounge.length === 0) return;
-
-  // Select speakers using weighted scoring
-  const speakers = selectSpeakers(inLounge, SPEAKERS_PER_TICK);
+  // Select speakers from all occupied buildings, weighted by occupancy
+  const speakers = selectSpeakersAcrossBuildings(available, SPEAKERS_PER_TICK);
 
   // Check if we should inject a contrarian (every 4th tick)
   if (tickCount % 4 === 0 && speakers.length > 0) {
     const currentSentiment = getConsensusSentiment();
     if (currentSentiment) {
-      const contrarian = inLounge.find(
-        (a) =>
+      const contrarian = available.find(
+        (a: AgentState) =>
           !speakers.includes(a) &&
           getAgentMood(a.id) !== currentSentiment &&
           getAgentMood(a.id) !== "neutral"
@@ -171,6 +180,7 @@ export async function runGroupChatTick(): Promise<void> {
           agentName: agent.name,
           oldMood,
           newMood: mood,
+          building: agent.location,
         });
       }
 
@@ -191,6 +201,7 @@ export async function runGroupChatTick(): Promise<void> {
         mood: chatMsg.mood,
         replyTo: chatMsg.replyTo,
         replyPreview: chatMsg.replyTo ? getReplyPreview(chatMsg.replyTo) : null,
+        building: agent.location,
       });
 
       state.addSpeech(agent.id, message);
@@ -199,6 +210,159 @@ export async function runGroupChatTick(): Promise<void> {
       console.log(`[Chat] ${agent.name} (${mood}): "${message.slice(0, 60)}${message.length > 60 ? "..." : ""}"`);
     }
   }
+}
+
+// ── Agent Magnetism ──
+// Agents are attracted to buildings based on recent events and their role.
+// This creates natural waves of activity: buildings light up when events happen,
+// then quiet down as agents drift back to the lounge.
+
+// Track when buildings last had notable events
+const buildingEventTimestamps: Record<string, number> = {
+  newsroom: 0, workshop: 0, exchange: 0, pit: 0, lounge: 0,
+};
+
+// How long an event keeps a building "hot" (attracts agents)
+const MAGNETISM_DECAY_MS = 40_000; // 40s
+
+// Track per-agent how many ticks they've been at a non-lounge building
+const agentBuildingTicks: Map<string, number> = new Map();
+
+/** Called by external systems when a notable event happens at a building */
+export function notifyBuildingEvent(building: string): void {
+  buildingEventTimestamps[building] = Date.now();
+}
+
+/** Role → which buildings attract them */
+const ROLE_AFFINITIES: Record<string, string[]> = {
+  creator: ["newsroom", "workshop"],
+  pricer: ["exchange", "newsroom"],
+  trader: ["pit", "exchange"],
+};
+
+function updateAgentMagnetism(available: AgentState[]): void {
+  const now = Date.now();
+
+  for (const agent of available) {
+    const currentLoc = agent.location;
+    const ticks = agentBuildingTicks.get(agent.id) || 0;
+
+    // If agent is at a non-lounge building, increment their stay counter
+    if (currentLoc !== "lounge") {
+      agentBuildingTicks.set(agent.id, ticks + 1);
+
+      // After 3-5 ticks at a work building, drift back to lounge
+      const maxStay = 3 + Math.floor(Math.random() * 3);
+      if (ticks >= maxStay) {
+        const fromBuilding = agent.location;
+        agentBuildingTicks.set(agent.id, 0);
+        state.moveAgent(agent.id, "lounge");
+        broadcast({ type: "agent_move", agentId: agent.id, destination: "lounge", reason: "Heading back" });
+        // Track for gossip-on-arrival
+        recentArrivals.set(agent.id, { from: fromBuilding, to: "lounge", tick: tickCount });
+        continue;
+      }
+    }
+
+    // If agent is in lounge, check if any hot building should attract them
+    if (currentLoc === "lounge") {
+      const affinities = ROLE_AFFINITIES[agent.role] || [];
+      let bestBuilding: string | null = null;
+      let bestScore = 0;
+
+      for (const building of affinities) {
+        const lastEvent = buildingEventTimestamps[building] || 0;
+        const age = now - lastEvent;
+        if (age > MAGNETISM_DECAY_MS) continue;
+
+        // Score: fresher events = higher pull, primary affinity = higher
+        const freshness = 1 - age / MAGNETISM_DECAY_MS;
+        const affinityBonus = affinities.indexOf(building) === 0 ? 1.5 : 1.0;
+        const score = freshness * affinityBonus;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestBuilding = building;
+        }
+      }
+
+      // Probability check: higher score = more likely to move
+      if (bestBuilding && Math.random() < bestScore * 0.4) {
+        // Don't overcrowd: max 4 agents per non-lounge building
+        const atBuilding = available.filter((a) => a.location === bestBuilding).length;
+        if (atBuilding < 4) {
+          const fromBuilding = agent.location;
+          agentBuildingTicks.set(agent.id, 0);
+          state.moveAgent(agent.id, bestBuilding as Building);
+          broadcast({
+            type: "agent_move",
+            agentId: agent.id,
+            destination: bestBuilding,
+            reason: getBuildingPullReason(agent.role, bestBuilding),
+          });
+          // Track for gossip-on-arrival
+          recentArrivals.set(agent.id, { from: fromBuilding, to: bestBuilding, tick: tickCount });
+        }
+      }
+    }
+  }
+}
+
+function getBuildingPullReason(role: string, building: string): string {
+  const reasons: Record<string, Record<string, string[]>> = {
+    creator: {
+      newsroom: ["Checking the feeds", "Something's happening", "News alert"],
+      workshop: ["Drafting ideas", "New market brewing"],
+    },
+    pricer: {
+      exchange: ["Running models", "Price check", "Updating fair values"],
+      newsroom: ["Checking impact", "Data review"],
+    },
+    trader: {
+      pit: ["Looking for trades", "Market's moving", "Opportunity spotted"],
+      exchange: ["Checking prices", "Spread analysis"],
+    },
+  };
+  const options = reasons[role]?.[building] || ["Heading over"];
+  return options[Math.floor(Math.random() * options.length)];
+}
+
+// ── Cross-Building Speaker Selection ──
+
+function selectSpeakersAcrossBuildings(pool: AgentState[], totalCount: number): AgentState[] {
+  // Group available agents by building
+  const byBuilding = new Map<string, AgentState[]>();
+  for (const agent of pool) {
+    const loc = agent.location;
+    if (!byBuilding.has(loc)) byBuilding.set(loc, []);
+    byBuilding.get(loc)!.push(agent);
+  }
+
+  // Allocate speaker slots proportional to occupancy, but every building with 2+ agents gets at least 1
+  const speakers: AgentState[] = [];
+  const buildings = Array.from(byBuilding.entries()).filter(([, agents]) => agents.length >= 2);
+
+  if (buildings.length === 0) {
+    // Fallback: just pick from wherever has agents
+    const allAgents = Array.from(byBuilding.values()).flat();
+    return selectSpeakers(allAgents, totalCount);
+  }
+
+  // Weight by occupancy
+  const totalAgents = buildings.reduce((sum, [, agents]) => sum + agents.length, 0);
+  let slotsRemaining = totalCount;
+
+  for (const [, agents] of buildings) {
+    const share = Math.max(1, Math.round((agents.length / totalAgents) * totalCount));
+    const slots = Math.min(share, slotsRemaining);
+    if (slots <= 0) break;
+
+    const selected = selectSpeakers(agents, slots);
+    speakers.push(...selected);
+    slotsRemaining -= selected.length;
+  }
+
+  return speakers;
 }
 
 // ── Speaker Selection ──
@@ -275,12 +439,18 @@ async function generateMessage(agent: AgentState): Promise<GenerateResult | null
   const marketContext = buildMarketContext();
   const currentMood = getAgentMood(agent.id);
 
-  const system = `You are ${agent.name}, a ${agent.role} in a prediction market town's group chat.
+  const buildingName = BUILDING_DISPLAY_NAMES[agent.location] || agent.location;
+  const buildingContext = agent.location === "lounge"
+    ? "You are chatting in the Lounge — the main hangout where agents from all roles argue and discuss."
+    : `You are in the ${buildingName}. ${BUILDING_CHAT_CONTEXT[agent.location] || ""}`;
+
+  const system = `You are ${agent.name}, a ${agent.role} in a prediction market town.
 PERSONALITY: ${agent.personality}
 SPECIALTY: ${agent.specialty}
 CURRENT MOOD: ${currentMood}
+LOCATION: ${buildingName}
 
-You are chatting in #the-lounge with other agents. This is a group chat — be natural, reference others by name, agree or disagree.
+${buildingContext} This is a group chat — be natural, reference others by name, agree or disagree.
 
 MOOD AFFECTS YOUR TONE:
 - bullish: optimistic, forward-looking, "I like this setup"
@@ -325,10 +495,28 @@ Only include conviction if this conversation has genuinely shifted your view on 
     parts.push("\nCHAT HISTORY:");
     for (const msg of window) {
       const replyPrefix = msg.replyTo ? `(replying to ${getReplyAuthor(msg.replyTo)}) ` : "";
-      parts.push(`[${msg.id}] ${msg.agentName} (${msg.mood}): ${replyPrefix}"${msg.message}"`);
+      const bldgTag = msg.building !== agent.location ? ` [from ${BUILDING_DISPLAY_NAMES[msg.building] || msg.building}]` : "";
+      parts.push(`[${msg.id}] ${msg.agentName} (${msg.mood})${bldgTag}: ${replyPrefix}"${msg.message}"`);
     }
   } else {
     parts.push("\nChat is quiet. Start a conversation about something interesting.");
+  }
+
+  // Gossip-on-arrival: if agent just moved here, suggest they bring news from where they came
+  const arrival = recentArrivals.get(agent.id);
+  if (arrival && arrival.tick >= tickCount - 1) {
+    const fromName = BUILDING_DISPLAY_NAMES[arrival.from] || arrival.from;
+    // Get recent messages from the building they came from
+    const fromMsgs = chatLog
+      .filter((m) => m.building === arrival.from)
+      .slice(0, 3)
+      .map((m) => `${m.agentName}: "${m.message}"`)
+      .join(", ");
+    if (fromMsgs) {
+      parts.push(`\nYou just came from ${fromName}. What you heard there: ${fromMsgs}. Reference this naturally in your message.`);
+    }
+    // Clear so they only gossip once
+    recentArrivals.delete(agent.id);
   }
 
   parts.push("\nJSON only.");
@@ -381,11 +569,21 @@ function buildAttentionWindow(agent: AgentState): ChatMessage[] {
   const window: ChatMessage[] = [];
   const seen = new Set<string>();
 
-  // Last 8 messages
-  for (const msg of chatLog.slice(0, 8)) {
+  // Prioritize messages from the same building (last 6)
+  const sameBuilding = chatLog.filter((m) => m.building === agent.location);
+  for (const msg of sameBuilding.slice(0, 6)) {
     if (!seen.has(msg.id)) {
       window.push(msg);
       seen.add(msg.id);
+    }
+  }
+
+  // Also include recent messages from other buildings (last 3, for cross-pollination)
+  for (const msg of chatLog.slice(0, 15)) {
+    if (!seen.has(msg.id) && msg.building !== agent.location) {
+      window.push(msg);
+      seen.add(msg.id);
+      if (window.length >= 9) break;
     }
   }
 
@@ -414,6 +612,7 @@ function addMessage(agent: AgentState, message: string, mood: AgentMood, replyTo
     message,
     mood,
     replyTo,
+    building: agent.location,
     timestamp: Date.now(),
   };
   chatLog.unshift(msg);
@@ -507,6 +706,7 @@ function checkDirectiveTrigger(agent: AgentState): void {
     agentName: agent.name,
     directive,
     destination: workBuilding,
+    building: agent.location,
   });
 
   // Reset conviction
