@@ -139,9 +139,9 @@ async function syncMarkets(): Promise<void> {
     for (const m of apiMarkets) {
       const question = m.question || m.shortQuestion || m.id;
       const yesPrice = m.outcomePrices?.find((op) => op.outcomeIndex === 0);
-      // Log raw price data for first few markets to debug scaling
-      if (yesPrice && newCount < 3) {
-        console.log(`[Sync:Price] "${question.slice(0, 40)}" outcomeIdx=0 lastPrice=${yesPrice.lastPrice} midPrice=${yesPrice.midPrice} bestBid=${yesPrice.bestBid} bestAsk=${yesPrice.bestAsk}`);
+      // Debug price data (only when values look wrong — > 1.0 after scaling)
+      if (yesPrice?.lastPrice && yesPrice.lastPrice / 1_000_000 > 1.0) {
+        console.log(`[Sync:Price:WARN] "${question.slice(0, 40)}" lastPrice=${yesPrice.lastPrice} → ${yesPrice.lastPrice / 1_000_000} (>1.0!)`);
       }
       // lastPrice is in raw units (PRICE_MULTIPLIER=10000, so 65¢ = 650000): divide by 1M for 0-1
       const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
