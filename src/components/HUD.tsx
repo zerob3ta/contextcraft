@@ -49,6 +49,7 @@ interface ChatMsg {
   oldMood?: AgentMood;
   newMood?: AgentMood;
   building?: string; // which building this message belongs to
+  severity?: "breaking" | "normal"; // for news type messages
   timestamp: number;
 }
 
@@ -364,16 +365,27 @@ function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: Chat
     );
   }
 
-  // --- Breaking news ---
+  // --- News (breaking + normal) ---
   if (msg.type === "news") {
+    const isBreaking = msg.severity === "breaking";
     return (
-      <div className="mx-2 my-1.5 rounded-md bg-amber-500/10 border border-amber-500/20 px-3 py-2">
+      <div className={`mx-2 my-1.5 rounded-md px-3 py-2 ${
+        isBreaking
+          ? "bg-amber-500/10 border border-amber-500/20"
+          : "bg-white/[0.03] border border-white/5"
+      }`}>
         <div className="flex items-center gap-1.5 mb-0.5">
-          <span className="font-pixel text-[8px] text-amber-400 bg-amber-400/15 px-1.5 py-0.5 rounded uppercase">
-            Breaking
+          <span className={`font-pixel text-[8px] px-1.5 py-0.5 rounded uppercase ${
+            isBreaking
+              ? "text-amber-400 bg-amber-400/15"
+              : "text-white/40 bg-white/5"
+          }`}>
+            {isBreaking ? "Breaking" : "News"}
           </span>
         </div>
-        <div className="text-[11px] text-amber-200 leading-snug">{msg.message}</div>
+        <div className={`text-[11px] leading-snug ${
+          isBreaking ? "text-amber-200" : "text-white/60"
+        }`}>{msg.message}</div>
       </div>
     );
   }
@@ -923,15 +935,14 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             const cutoff = Date.now() - 30 * 60_000;
             return next.filter((n) => n.arrivedAt > cutoff).slice(-30);
           });
-          // Add breaking news to chat stream
-          if (event.severity === "breaking") {
-            addChatMessage({
-              type: "news",
-              message: event.headline,
-              building: "newsroom",
-              timestamp: Date.now(),
-            });
-          }
+          // Add all news to newsroom chat stream (breaking + normal)
+          addChatMessage({
+            type: "news",
+            message: event.headline,
+            building: "newsroom",
+            severity: event.severity || "normal",
+            timestamp: Date.now(),
+          });
           break;
         }
 
