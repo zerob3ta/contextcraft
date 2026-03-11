@@ -191,6 +191,7 @@ export async function placeTrade(
       size,
       price: Math.round(price * 100) / 100,
       building: "pit",
+      question: market.question,
     });
     notifyBuildingEvent("pit");
 

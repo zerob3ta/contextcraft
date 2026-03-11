@@ -213,6 +213,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
             size: localSize,
             price: Math.round(price * 100) / 100,
             building: "pit",
+            question: market.question,
           });
           notifyBuildingEvent("pit");
           const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
@@ -233,6 +234,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
           size: localSize,
           price: Math.round(price * 100) / 100,
           building: "pit",
+          question: market.question,
         });
         notifyBuildingEvent("pit");
         const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);

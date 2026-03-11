@@ -42,6 +42,7 @@ export type GameEvent =
       size: number;
       price: number;
       building?: string;
+      question?: string;
     }
   | {
       type: "news_alert";

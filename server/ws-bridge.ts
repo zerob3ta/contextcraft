@@ -7,7 +7,7 @@ export type GameEvent =
   | { type: "agent_speak"; agentId: string; message: string; emotion: string; building?: string }
   | { type: "market_spawning"; marketId: string; question: string; creator: string; building?: string; apiMarketId?: string; url?: string }
   | { type: "price_update"; marketId: string; fairValue: number; spread: number; building?: string }
-  | { type: "trade_executed"; agentId: string; marketId: string; side: "YES" | "NO"; size: number; price: number; building?: string }
+  | { type: "trade_executed"; agentId: string; marketId: string; side: "YES" | "NO"; size: number; price: number; building?: string; question?: string }
   | { type: "news_alert"; headline: string; source: string; severity: "breaking" | "normal"; building?: string }
   | { type: "chat_message"; id: string; agentId: string; agentName: string; role: string; message: string; mood: AgentMood; replyTo: string | null; replyPreview: string | null; building?: string }
   | { type: "chat_directive"; agentId: string; agentName: string; directive: string; destination: string; building?: string }

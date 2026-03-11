@@ -892,7 +892,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           // Look up market name for the trade
           setMarkets((currentMarkets) => {
             const market = currentMarkets.find((m) => m.id === event.marketId);
-            const marketQ = market ? market.question : "a market";
+            const marketQ = event.question || market?.question || "a market";
             const shortQ = marketQ.length > 50 ? marketQ.slice(0, 47) + "..." : marketQ;
             addChatMessage({
               type: "activity",
