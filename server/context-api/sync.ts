@@ -138,8 +138,12 @@ async function syncMarkets(): Promise<void> {
     let newCount = 0;
     for (const m of apiMarkets) {
       const question = m.question || m.shortQuestion || m.id;
-      const yesPrice = m.outcomePrices?.find((op) => op.outcomeIndex === 1);
-      // lastPrice is in raw units (e.g. 615000 = 61.5¢): /10000 → cents, /100 → 0-1 probability
+      const yesPrice = m.outcomePrices?.find((op) => op.outcomeIndex === 0);
+      // Log raw price data for first few markets to debug scaling
+      if (yesPrice && newCount < 3) {
+        console.log(`[Sync:Price] "${question.slice(0, 40)}" outcomeIdx=0 lastPrice=${yesPrice.lastPrice} midPrice=${yesPrice.midPrice} bestBid=${yesPrice.bestBid} bestAsk=${yesPrice.bestAsk}`);
+      }
+      // lastPrice is in raw units (PRICE_MULTIPLIER=10000, so 65¢ = 650000): divide by 1M for 0-1
       const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
 
       // Read resolution status directly from SDK market object
@@ -388,7 +392,7 @@ async function searchChatTopics(): Promise<void> {
         if (!m.status || m.status !== "active") continue;
 
         const question = m.question || m.shortQuestion || m.id;
-        const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 1);
+        const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 0);
         const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
 
         const localId = state.addExternalMarket({
@@ -491,8 +495,8 @@ export async function searchMarketsForNews(headline: string): Promise<void> {
       if (!m.status || m.status !== "active") continue;
 
       const question = m.question || m.shortQuestion || m.id;
-      const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 1);
-      const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 10000 : null;
+      const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 0);
+      const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
 
       const localId = state.addExternalMarket({
         apiMarketId: m.id,
