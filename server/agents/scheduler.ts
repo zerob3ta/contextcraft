@@ -161,6 +161,17 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       const market = state.markets.get(action.marketId);
       if (!market) break;
 
+      // Hard block: do not price resolving/resolved markets
+      if (market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed" ||
+          market.resolutionStatus === "pending" || market.resolutionStatus === "resolved") {
+        console.log(`[Scheduler] BLOCKED pricing on ${action.marketId} (status: ${market.apiStatus}, resolution: ${market.resolutionStatus})`);
+        // Auto-cancel any open orders on this market
+        if (isContextEnabled() && market.apiMarketId) {
+          cancelOrders(agentId, action.marketId).catch(() => {});
+        }
+        break;
+      }
+
       state.moveAgent(agentId, "exchange");
       broadcast({ type: "agent_move", agentId, destination: "exchange", reason: "Pricing" });
 
@@ -197,6 +208,17 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
     case "trade": {
       const market = state.markets.get(action.marketId);
       if (!market || market.fairValue === null) break;
+
+      // Hard block: do not trade resolving/resolved markets
+      if (market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed" ||
+          market.resolutionStatus === "pending" || market.resolutionStatus === "resolved") {
+        console.log(`[Scheduler] BLOCKED trade on ${action.marketId} (status: ${market.apiStatus}, resolution: ${market.resolutionStatus})`);
+        // Auto-cancel any open orders on this market
+        if (isContextEnabled() && market.apiMarketId) {
+          cancelOrders(agentId, action.marketId).catch(() => {});
+        }
+        break;
+      }
 
       const size = clampTradeSize(agentId, action.size);
       const dir = action.direction;

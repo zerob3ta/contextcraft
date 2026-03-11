@@ -142,17 +142,21 @@ async function syncMarkets(): Promise<void> {
       // lastPrice is in raw units (e.g. 615000 = 61.5¢): /10000 → cents, /100 → 0-1 probability
       const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
 
-      // Read resolution status from API market
-      const apiStatus = (m as Record<string, unknown>).status as string | undefined;
-      const resolutionStatus = (m as Record<string, unknown>).resolutionStatus as string | undefined;
-      const proposedAt = (m as Record<string, unknown>).proposedAt as string | null | undefined;
-      const resolvedAt = (m as Record<string, unknown>).resolvedAt as string | null | undefined;
-      const apiOutcome = (m as Record<string, unknown>).outcome as number | null | undefined;
-      const payoutPcts = (m as Record<string, unknown>).payoutPcts as number[] | null | undefined;
+      // Read resolution status directly from SDK market object
+      const apiStatus = m.status;  // "active" | "pending" | "resolved" | "closed"
+      const resolutionStatus = m.resolutionStatus;  // "none" | "pending" | "resolved"
+      const proposedAt = m.proposedAt;
+      const resolvedAt = m.resolvedAt;
+      const apiOutcome = m.outcome;
+      const payoutPcts = m.payoutPcts;
 
       // Check if we already track this market
       const existing = state.getMarketByApiId(m.id);
       if (existing) {
+        // Log resolution fields for debugging
+        if (apiStatus !== "active" || resolutionStatus !== "none") {
+          console.log(`[Sync] ${existing.id} resolution: status=${apiStatus}, resStatus=${resolutionStatus}, outcome=${apiOutcome}, proposedAt=${proposedAt}`);
+        }
         // Update resolution status
         const prevStatus = existing.apiStatus;
         if (apiStatus) existing.apiStatus = apiStatus as Market["apiStatus"];
@@ -224,6 +228,26 @@ async function syncMarkets(): Promise<void> {
         type: "markets_synced",
         count: state.getActiveMarkets().length,
       });
+    }
+
+    // Auto-cancel all agent orders on resolving/resolved markets
+    const resolvingMarkets = state.getActiveMarkets().filter((m) =>
+      m.apiMarketId && (
+        m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed" ||
+        m.resolutionStatus === "pending" || m.resolutionStatus === "resolved"
+      )
+    );
+    if (resolvingMarkets.length > 0) {
+      const { cancelOrders } = await import("./trading");
+      for (const market of resolvingMarkets) {
+        // Cancel orders for every agent that has open orders on this market
+        for (const agent of state.agents.values()) {
+          if (agent.openOrders?.some((o) => o.marketId === market.id)) {
+            console.log(`[Sync] Auto-canceling ${agent.name}'s orders on resolving market ${market.id}`);
+            cancelOrders(agent.id, market.id).catch(() => {});
+          }
+        }
+      }
     }
 
     recordSuccess();
