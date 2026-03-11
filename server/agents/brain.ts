@@ -89,12 +89,24 @@ export function parseJsonAction(text: string): unknown {
     } catch { /* continue */ }
   }
 
-  // Try finding first JSON object
-  const objMatch = text.match(/\{[\s\S]*?\}/);
-  if (objMatch) {
-    try {
-      return JSON.parse(objMatch[0]);
-    } catch { /* continue */ }
+  // Try finding first complete JSON object by matching balanced braces
+  const startIdx = text.indexOf("{");
+  if (startIdx >= 0) {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = startIdx; i < text.length; i++) {
+      const ch = text[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      if (ch === "}") { depth--; if (depth === 0) {
+        try { return JSON.parse(text.slice(startIdx, i + 1)); } catch { /* continue */ }
+        break;
+      }}
+    }
   }
 
   return null;
