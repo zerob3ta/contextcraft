@@ -144,6 +144,110 @@ async function syncMarkets(): Promise<void> {
 }
 
 /**
+ * Search Context Markets for markets related to a news headline.
+ * Called when breaking/significant news arrives — surfaces relevant markets for agents.
+ */
+const SEARCH_COOLDOWN_MS = 30_000; // Don't search more than once per 30s
+let lastSearchAt = 0;
+const MAX_NEWS_MARKETS = 8; // Cap how many news-linked markets we track
+
+export async function searchMarketsForNews(headline: string): Promise<void> {
+  if (isCircuitBroken()) return;
+  if (Date.now() - lastSearchAt < SEARCH_COOLDOWN_MS) return;
+  lastSearchAt = Date.now();
+
+  const client = getReadClient();
+  if (!client) return;
+
+  // Extract 1-2 keywords from headline for search
+  const keywords = extractSearchKeywords(headline);
+  if (!keywords) return;
+
+  try {
+    const result = await client.markets.search({ q: keywords, limit: 5 });
+    const found = result?.markets ?? [];
+
+    let newCount = 0;
+    for (const m of found) {
+      if (state.getMarketByApiId(m.id)) continue;
+      if (!m.status || m.status !== "active") continue;
+
+      const question = m.question || m.shortQuestion || m.id;
+      const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 1);
+      const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 10000 : null;
+
+      const localId = state.addExternalMarket({
+        apiMarketId: m.id,
+        question,
+        fairValue,
+      });
+
+      if (localId) {
+        newCount++;
+        // Add as news-linked market so agents see it
+        state.addMarketNews(localId, `📰 Related to: ${headline.slice(0, 60)}`);
+      }
+    }
+
+    if (newCount > 0) {
+      console.log(`[Context Search] "${keywords}" → ${newCount} new markets from news`);
+      broadcast({ type: "markets_synced", count: state.getActiveMarkets().length });
+    }
+
+    recordSuccess();
+  } catch (err) {
+    console.error(`[Context Search] Failed for "${keywords}":`, err);
+    recordFailure();
+  }
+}
+
+/**
+ * Extract 1-2 meaningful search keywords from a news headline.
+ * The Context Markets search API works best with simple queries.
+ */
+function extractSearchKeywords(headline: string): string | null {
+  const h = headline.toLowerCase();
+
+  // Known entity patterns — extract the most searchable term
+  type ExtractFn = string | ((m: RegExpMatchArray) => string);
+  const patterns: [RegExp, ExtractFn][] = [
+    [/\b(bitcoin|btc)\b/, "bitcoin"],
+    [/\b(ethereum|eth)\b/, "ethereum"],
+    [/\b(solana|sol)\b/, "solana"],
+    [/\b(trump)\b/, "trump"],
+    [/\b(fed|federal reserve)\b/, "federal reserve"],
+    [/\b(openai|chatgpt)\b/, "openai"],
+    [/\b(nvidia)\b/, "nvidia"],
+    [/\b(tesla)\b/, "tesla"],
+    [/\b(apple)\b/, "apple"],
+    [/\b(google)\b/, "google"],
+    [/\b(spacex)\b/, "spacex"],
+    [/\b(nba|nfl|nhl|ncaab?|mlb)\b/i, (m: RegExpMatchArray) => m[1].toUpperCase()],
+    [/\b(lakers|celtics|cavaliers|knicks|warriors|clippers|rockets|nuggets|heat|bucks)\b/, (m: RegExpMatchArray) => m[1]],
+    [/\b(ukraine|russia|china|iran|israel)\b/, (m: RegExpMatchArray) => m[1]],
+    [/\b(tariff|trade war)\b/, "tariff"],
+    [/\b(recession|inflation|rate cut|rate hike)\b/, (m: RegExpMatchArray) => m[0]],
+  ];
+
+  for (const [regex, extract] of patterns) {
+    const match = h.match(regex);
+    if (match) {
+      return typeof extract === "function" ? extract(match) : extract;
+    }
+  }
+
+  // Fallback: grab the first significant noun (skip common words)
+  const stopWords = new Set(["the", "a", "an", "is", "are", "was", "were", "will", "has", "have", "had", "been", "be", "do", "does", "did", "not", "no", "yes", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "up", "about", "into", "over", "after", "new", "says", "report", "reports", "just", "now", "today", "breaking", "update", "news"]);
+  const words = headline.replace(/[^a-zA-Z\s]/g, "").split(/\s+/).filter((w) => w.length > 3 && !stopWords.has(w.toLowerCase()));
+
+  if (words.length > 0) {
+    return words[0]; // Single keyword works best with the API
+  }
+
+  return null;
+}
+
+/**
  * Check if the Context API circuit is healthy.
  */
 export function isApiHealthy(): boolean {

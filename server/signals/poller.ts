@@ -12,6 +12,8 @@ import { qualityGate, directHeadline } from "./quality-gate";
 import { state, type NewsItem } from "../state";
 import { broadcast } from "../ws-bridge";
 import { notifyBuildingEvent } from "../agents/group-chat";
+import { searchMarketsForNews } from "../context-api/sync";
+import { isContextEnabled } from "../context-api/client";
 
 const timers: ReturnType<typeof setInterval>[] = [];
 const timeouts: ReturnType<typeof setTimeout>[] = [];
@@ -74,6 +76,11 @@ function emitHeadline(headline: string, source: string, category: string, severi
 
   // Notify magnetism system so agents are attracted to newsroom
   notifyBuildingEvent("newsroom");
+
+  // Search Context Markets for related markets (non-blocking)
+  if (isContextEnabled() && severity === "breaking") {
+    searchMarketsForNews(headline).catch(() => {});
+  }
 
   console.log(`[News:${severity}] ${headline.slice(0, 70)}`);
 

@@ -49,7 +49,7 @@ export function buildUserPrompt(
       parts.push("YOUR POSITIONS:");
       for (const p of agent.positions.slice(0, 5)) {
         const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
-        const label = m ? m.question.slice(0, 40) : p.marketId.slice(0, 10);
+        const label = m ? m.question.slice(0, 60) : "unknown market";
         parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" (avg ${Math.round(p.avgPrice * 100)}¢)`);
       }
     }

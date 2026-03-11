@@ -192,6 +192,15 @@ class ServerState {
     ).slice(0, 5);
   }
 
+  addMarketNews(marketId: string, headline: string): void {
+    this.addNews({
+      headline,
+      snippet: "",
+      source: "Context Markets",
+      category: `market:${marketId}`,
+    });
+  }
+
   // ── Markets ──
 
   createMarket(question: string, creator: string): Market {

@@ -725,7 +725,7 @@ function buildMarketContext(): string {
   const lines = markets.slice(0, 5).map((m) => {
     const price = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}c` : "unpriced";
     const title = shortMarketTitle(m.question);
-    return `[${m.id}] "${title}" (${price})`;
+    return `"${title}" (${price})`;
   });
   return `ACTIVE MARKETS: ${lines.join(" | ")}`;
 }
