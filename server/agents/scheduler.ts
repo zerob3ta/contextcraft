@@ -331,6 +331,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
       notifyBuildingEvent("workshop");
       notifyBuildingEvent("exchange");
       state.addAction(agentId, "submitted market", question.slice(0, 60));
+      announceNewMarket(agentId, question);
     } else {
       console.log(`[Creator:${agent.name}] Context API submit failed, falling back to local`);
       const market = state.createMarket(question, agentId);
@@ -339,6 +340,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
       notifyBuildingEvent("workshop");
       notifyBuildingEvent("exchange");
       state.addAction(agentId, "created market", question.slice(0, 60));
+      announceNewMarket(agentId, question);
     }
   } else {
     // Local-only creation
@@ -348,6 +350,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
     notifyBuildingEvent("workshop");
     notifyBuildingEvent("exchange");
     state.addAction(agentId, "created market", question.slice(0, 60));
+    announceNewMarket(agentId, question);
   }
 
   state.setAgentCooldown(agentId, 20_000);
@@ -390,6 +393,20 @@ function inferSources(question: string, topic: string): string[] {
   }
 
   return sources.slice(0, 5);
+}
+
+/**
+ * Announce a new market as news — pricers and traders need to know.
+ */
+function announceNewMarket(agentId: string, question: string): void {
+  const agentName = state.agents.get(agentId)?.name || agentId;
+  const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
+  const headline = `New market: "${shortQ}" — created by ${agentName}. Pricers: needs fair value. Traders: watch for entry.`;
+  state.addNews({ headline, snippet: question, source: "Context Markets", category: "Markets" });
+  broadcast({ type: "news_alert", headline, source: "Context Markets", severity: "normal", building: "newsroom" });
+  notifyBuildingEvent("newsroom");
+  notifyBuildingEvent("exchange");
+  notifyBuildingEvent("pit");
 }
 
 function shortTitle(question: string): string {

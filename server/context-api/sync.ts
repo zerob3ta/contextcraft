@@ -224,22 +224,42 @@ async function syncOracleData(): Promise<void> {
           prob = isYes ? pct / 100 : (100 - pct) / 100;
         }
 
+        const prevProb = market.oracleProb;
         market.oracleProb = prob;
         market.oracleConfidence = oracleData.confidenceLevel || null;
-        market.oracleSummary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 120) || null;
+        const summary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 120) || null;
+        market.oracleSummary = summary;
         market.oracleUpdatedAt = Date.now();
+
+        const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+
+        // Publish oracle update to newsroom when probability changes meaningfully or first time
+        if (prob !== null) {
+          const oraclePct = Math.round(prob * 100);
+          const prevPct = prevProb !== null ? Math.round(prevProb * 100) : null;
+          const isNew = prevProb === null;
+          const movedEnough = prevPct !== null && Math.abs(oraclePct - prevPct) >= 3;
+
+          if (isNew || movedEnough) {
+            const moveStr = movedEnough ? ` (was ${prevPct}%)` : "";
+            const summaryStr = summary ? ` — ${summary.slice(0, 80)}` : "";
+            const headline = `Oracle update: "${shortQ}" at ${oraclePct}%${moveStr}${summaryStr}`;
+            state.addNews({ headline, snippet: summary || "", source: "Oracle", category: "Markets" });
+            broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
+            notifyBuildingEvent("newsroom");
+          }
+        }
 
         // Compute divergence
         if (prob !== null && market.fairValue !== null) {
-          const oracleCents = Math.round(prob * 100);
-          const marketCents = Math.round(market.fairValue * 100);
-          market.oracleDivergence = oracleCents - marketCents;
+          const oraclePct = Math.round(prob * 100);
+          const marketPct = Math.round(market.fairValue * 100);
+          market.oracleDivergence = oraclePct - marketPct;
 
-          // Emit significant divergence as a newsroom signal
+          // Emit significant divergence as an exchange/pit signal
           if (Math.abs(market.oracleDivergence) >= 10) {
-            const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
             const dir = market.oracleDivergence > 0 ? "underpriced" : "overpriced";
-            const headline = `Oracle signal: "${shortQ}" looks ${dir} by ${Math.abs(market.oracleDivergence)}¢ (oracle: ${oracleCents}¢, market: ${marketCents}¢)`;
+            const headline = `Oracle signal: "${shortQ}" looks ${dir} by ${Math.abs(market.oracleDivergence)}¢ (oracle: ${oraclePct}%, market: ${marketPct}%)`;
             state.addNews({ headline, snippet: "", source: "Oracle", category: "Markets" });
             broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
             notifyBuildingEvent("newsroom");

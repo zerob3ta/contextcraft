@@ -67,7 +67,7 @@ const BUILDING_CHAT_CONTEXT: Record<string, string> = {
 GOOD: "Lakers are cooked tonight", "No way Iran deal happens", "Bitcoin's going to the moon", roasting someone's bad take
 BAD: "Lakers at 54c is mispriced", "I'd price this at 0.65", "The spread is too wide", any cents/percentages
 Talk like you're at a bar with friends — sports takes, politics, culture, trash talk, personal stories, hot takes. Be loose and opinionated.`,
-  newsroom: "React to breaking news. Debate what it means. You have exclusive access to the latest headlines here.",
+  newsroom: "You're in the NEWSROOM — the information hub. React to breaking news, oracle updates, and new market announcements. Debate what it means for the markets. You have exclusive access to the latest headlines and oracle intelligence here. Share what you learn with others when you leave.",
   workshop: "Discuss which markets should be created. Debate market design and questions.",
   exchange: "Talk about pricing, fair values, spreads. Debate whether markets are mispriced.",
   pit: "Talk about trades, positions, and market moves. Trash-talk other traders' positions.",
@@ -504,12 +504,25 @@ Only include conviction if this conversation genuinely shifted your view on a SP
 
   // News is ONLY available in the newsroom — other buildings get nothing
   if (agent.location === "newsroom") {
-    const news = state.getRecentNews(5);
+    const news = state.getRecentNews(8);
     if (news.length > 0) {
-      parts.push("\nBREAKING NEWS (only you can see this — you're in the Newsroom):");
-      for (const n of news.slice(0, 5)) {
+      parts.push("\nBREAKING NEWS FEED (only visible in the Newsroom — react to these!):");
+      for (const n of news.slice(0, 8)) {
         const ago = Math.round((Date.now() - n.timestamp) / 60_000);
         parts.push(`- [${n.category}] ${n.headline} (${ago}min ago)`);
+      }
+      parts.push("You're in the Newsroom — discuss what this news means, debate implications, break stories to the group.");
+    }
+
+    // Oracle summaries for active markets — newsroom gets the intel
+    const markets = state.getActiveMarkets();
+    const withOracle = markets.filter((m) => m.oracleSummary && m.oracleProb !== null);
+    if (withOracle.length > 0) {
+      parts.push("\nORACLE INTELLIGENCE (AI probability estimates for active markets):");
+      for (const m of withOracle.slice(0, 5)) {
+        const shortQ = shortMarketTitle(m.question);
+        const pct = Math.round(m.oracleProb! * 100);
+        parts.push(`- "${shortQ}": ${pct}% (${m.oracleConfidence || "?"}) — ${m.oracleSummary!.slice(0, 80)}`);
       }
     }
   }

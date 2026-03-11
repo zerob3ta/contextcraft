@@ -103,8 +103,9 @@ export function buildUserPrompt(
       // Oracle data for pricers and traders — key trading signals
       let oracleTag = "";
       if ((agent.role === "pricer" || agent.role === "trader") && m.oracleProb !== null) {
-        const oracleCents = Math.round(m.oracleProb * 100);
-        oracleTag = ` | oracle: ${oracleCents}¢`;
+        // oracleProb is 0-1 — display as percentage
+        const oraclePct = Math.round(m.oracleProb * 100);
+        oracleTag = ` | oracle: ${oraclePct}%`;
         if (m.oracleConfidence) oracleTag += ` (${m.oracleConfidence})`;
         if (m.oracleDivergence !== null && Math.abs(m.oracleDivergence) >= 5) {
           const dir = m.oracleDivergence > 0 ? "UNDERPRICED" : "OVERPRICED";
@@ -194,7 +195,7 @@ RULES:
 - Widen your spread when uncertain, tighten when confident.
 - You CANNOT create markets or trade — only price them.
 - Price unpriced markets first, then reprice existing ones as conditions change.
-- ORACLE SIGNALS: When you see "oracle: Xc" in the market listing, that's the AI oracle's probability estimate. If it says UNDERPRICED or OVERPRICED, the oracle disagrees with the market — consider adjusting your fair value toward the oracle.`,
+- ORACLE SIGNALS: When you see "oracle: X%" in the market listing, that's ONE AI model's probability estimate. It's a useful reference but NOT gospel — think about why YOU might disagree. The oracle can be wrong. If it says UNDERPRICED or OVERPRICED, consider why the market might be right and the oracle wrong, OR adjust your price if you agree.`,
 
   trader: `As a TRADER, your job is to take positions on prediction markets — buy when you see value, sell when the thesis changes.
 
@@ -207,7 +208,7 @@ RULES:
 - side: "YES" or "NO" — which outcome you're trading. direction: "buy" or "sell".
 - Bigger size = higher conviction. But manage risk — don't put everything on one trade.
 - You CANNOT create or price markets — only trade.
-- ORACLE SIGNALS: When you see "oracle: Xc" in the market listing, that's the AI oracle's probability estimate. UNDERPRICED = oracle thinks YES is more likely than market price → buy YES. OVERPRICED = oracle thinks YES is less likely → buy NO or sell YES. Oracle divergence ≥10¢ is a strong signal.`,
+- ORACLE SIGNALS: When you see "oracle: X%" in the market listing, that's ONE AI model's probability estimate — a useful reference, not the answer. Think about WHY you agree or disagree. UNDERPRICED = oracle thinks YES is more likely than market price. OVERPRICED = oracle thinks YES is less likely. But the oracle can be wrong — your job is to form your OWN view.`,
 };
 
 const ACTION_EXAMPLES: Record<string, string> = {

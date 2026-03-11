@@ -148,13 +148,13 @@ function getLocalContext(topic: string, marketQuestion?: string): string | null 
     m.oracleDivergence !== null && Math.abs(m.oracleDivergence) >= 5 && m.oracleProb !== null
   );
   if (divergentMarkets.length > 0) {
-    parts.push("ORACLE DIVERGENCE SIGNALS:");
+    parts.push("ORACLE DIVERGENCE SIGNALS (one model's view — form your own opinion):");
     for (const m of divergentMarkets.slice(0, 5)) {
       const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
-      const oracleCents = Math.round(m.oracleProb! * 100);
-      const marketCents = m.fairValue !== null ? Math.round(m.fairValue * 100) : "?";
+      const oraclePct = Math.round(m.oracleProb! * 100);
+      const marketPct = m.fairValue !== null ? Math.round(m.fairValue * 100) : "?";
       const dir = m.oracleDivergence! > 0 ? "UNDERPRICED" : "OVERPRICED";
-      let detail = `  ${dir}: "${shortQ}" — oracle: ${oracleCents}¢, market: ${marketCents}¢ (${m.oracleConfidence || "?"} confidence)`;
+      let detail = `  ${dir}: "${shortQ}" — oracle: ${oraclePct}%, market: ${marketPct}% (${m.oracleConfidence || "?"} confidence)`;
       if (m.oracleSummary) detail += ` — ${m.oracleSummary.slice(0, 80)}`;
       parts.push(detail);
     }
