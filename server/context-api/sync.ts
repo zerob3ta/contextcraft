@@ -137,8 +137,8 @@ async function syncMarkets(): Promise<void> {
     for (const m of apiMarkets) {
       const question = m.question || m.shortQuestion || m.id;
       const yesPrice = m.outcomePrices?.find((op) => op.outcomeIndex === 1);
-      // lastPrice is in raw units (e.g. 615000 = 61.5¢), divide by 10000 to get probability 0-1
-      const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 10000 : null;
+      // lastPrice is in raw units (e.g. 615000 = 61.5¢): /10000 → cents, /100 → 0-1 probability
+      const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
 
       // Check if we already track this market
       const existing = state.getMarketByApiId(m.id);
@@ -345,7 +345,7 @@ async function searchChatTopics(): Promise<void> {
 
         const question = m.question || m.shortQuestion || m.id;
         const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 1);
-        const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 10000 : null;
+        const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
 
         const localId = state.addExternalMarket({
           apiMarketId: m.id,
