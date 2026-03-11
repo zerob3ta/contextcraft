@@ -42,7 +42,10 @@ const MAX_CHAT_LOG = 50;
 const CONVICTION_DIRECTIVE_THRESHOLD = 60;
 const CONVICTION_DECAY_PER_TICK = 3;
 const MOOD_DECAY_TICKS = 15; // extreme moods decay after 15 ticks without reinforcement
-const MAX_MESSAGE_LENGTH = 120;
+// Prompt target: what we ASK the LLM to aim for (via prompt instructions)
+// Render limit: hard cap on what we'll actually send to the frontend (never truncate mid-thought)
+const PROMPT_TARGET_LENGTH = 100; // chars — what we tell the LLM to aim for
+const RENDER_MAX_LENGTH = 200;    // chars — hard cap, but we never truncate below this
 
 // Where each role goes to fulfill directives
 const ROLE_WORK_BUILDINGS: Record<string, Building> = {
@@ -555,9 +558,9 @@ Only include conviction if this conversation genuinely shifted your view on a SP
 
     let message = raw.message.trim();
 
-    // Enforce max length
-    if (message.length > MAX_MESSAGE_LENGTH) {
-      message = message.slice(0, MAX_MESSAGE_LENGTH);
+    // Hard cap — but generous enough to never cut mid-thought
+    if (message.length > RENDER_MAX_LENGTH) {
+      message = message.slice(0, RENDER_MAX_LENGTH);
     }
 
     // Similarity gate — reject parroting
