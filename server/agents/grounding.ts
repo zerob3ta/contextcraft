@@ -142,21 +142,15 @@ function getLocalContext(topic: string, marketQuestion?: string): string | null 
     }
   }
 
-  // Oracle context — divergence signals for pricers/traders
+  // Oracle qualitative context for pricers/traders
   const markets = state.getActiveMarkets();
-  const divergentMarkets = markets.filter((m) =>
-    m.oracleDivergence !== null && Math.abs(m.oracleDivergence) >= 5 && m.oracleProb !== null
-  );
-  if (divergentMarkets.length > 0) {
-    parts.push("ORACLE DIVERGENCE SIGNALS (one model's view — form your own opinion):");
-    for (const m of divergentMarkets.slice(0, 5)) {
+  const withOracle = markets.filter((m) => m.oracleSummary);
+  if (withOracle.length > 0) {
+    parts.push("ORACLE NOTES (qualitative — one model's take, not gospel):");
+    for (const m of withOracle.slice(0, 5)) {
       const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
-      const oraclePct = Math.round(m.oracleProb! * 100);
-      const marketPct = m.fairValue !== null ? Math.round(m.fairValue * 100) : "?";
-      const dir = m.oracleDivergence! > 0 ? "UNDERPRICED" : "OVERPRICED";
-      let detail = `  ${dir}: "${shortQ}" — oracle: ${oraclePct}%, market: ${marketPct}% (${m.oracleConfidence || "?"} confidence)`;
-      if (m.oracleSummary) detail += ` — ${m.oracleSummary.slice(0, 80)}`;
-      parts.push(detail);
+      const confStr = m.oracleConfidence ? ` (${m.oracleConfidence})` : "";
+      parts.push(`  "${shortQ}" — ${m.oracleSummary!.slice(0, 100)}${confStr}`);
     }
   }
 

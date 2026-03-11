@@ -36,14 +36,14 @@ export interface Market {
   outcome: number | null;            // 0=YES won, 1=NO won, null=unresolved
   payoutPcts: number[] | null;       // payout percentages per outcome
   // Oracle + quotes data (from Context Markets AI oracle)
-  oracleProb: number | null;        // oracle probability estimate (0-1)
+  oracleProb: number | null;        // DEPRECATED — kept for compat, always null
   oracleConfidence: string | null;   // "low" | "medium" | "high"
-  oracleSummary: string | null;      // short reasoning from oracle
+  oracleSummary: string | null;      // short reasoning from oracle (qualitative)
   oracleUpdatedAt: number | null;
   bestBid: number | null;            // current best bid (cents)
   bestAsk: number | null;            // current best ask (cents)
   lastTradePrice: number | null;     // last trade price (cents)
-  oracleDivergence: number | null;   // oracle - market price (cents, signed)
+  oracleDivergence: number | null;   // DEPRECATED — kept for compat, always null
   priceHistory: { time: number; price: number }[];
 }
 

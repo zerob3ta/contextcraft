@@ -514,15 +514,15 @@ Only include conviction if this conversation genuinely shifted your view on a SP
       parts.push("You're in the Newsroom — discuss what this news means, debate implications, break stories to the group.");
     }
 
-    // Oracle summaries for active markets — newsroom gets the intel
+    // Oracle qualitative summaries for active markets — newsroom gets the intel
     const markets = state.getActiveMarkets();
-    const withOracle = markets.filter((m) => m.oracleSummary && m.oracleProb !== null);
+    const withOracle = markets.filter((m) => m.oracleSummary);
     if (withOracle.length > 0) {
-      parts.push("\nORACLE INTELLIGENCE (AI probability estimates for active markets):");
+      parts.push("\nORACLE INTEL (qualitative takes from one AI model — not gospel):");
       for (const m of withOracle.slice(0, 5)) {
         const shortQ = shortMarketTitle(m.question);
-        const pct = Math.round(m.oracleProb! * 100);
-        parts.push(`- "${shortQ}": ${pct}% (${m.oracleConfidence || "?"}) — ${m.oracleSummary!.slice(0, 80)}`);
+        const confStr = m.oracleConfidence ? ` (${m.oracleConfidence})` : "";
+        parts.push(`- "${shortQ}": ${m.oracleSummary!.slice(0, 100)}${confStr}`);
       }
     }
   }

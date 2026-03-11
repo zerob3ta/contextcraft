@@ -110,17 +110,11 @@ export function buildUserPrompt(
         statusTag = ` ⚠️RESOLVING→${outcomeStr} (STOP TRADING)`;
       }
 
-      // Oracle data for pricers and traders — key trading signals
+      // Oracle qualitative context for pricers and traders
       let oracleTag = "";
-      if ((agent.role === "pricer" || agent.role === "trader") && m.oracleProb !== null) {
-        // oracleProb is 0-1 — display as percentage
-        const oraclePct = Math.round(m.oracleProb * 100);
-        oracleTag = ` | oracle: ${oraclePct}%`;
+      if ((agent.role === "pricer" || agent.role === "trader") && m.oracleSummary) {
+        oracleTag = ` | oracle: "${m.oracleSummary.slice(0, 60)}"`;
         if (m.oracleConfidence) oracleTag += ` (${m.oracleConfidence})`;
-        if (m.oracleDivergence !== null && Math.abs(m.oracleDivergence) >= 5) {
-          const dir = m.oracleDivergence > 0 ? "UNDERPRICED" : "OVERPRICED";
-          oracleTag += ` ⚡${dir} by ${Math.abs(m.oracleDivergence)}pts`;
-        }
       }
 
       // Price history trend
@@ -205,7 +199,7 @@ RULES:
 - Widen your spread when uncertain, tighten when confident.
 - You CANNOT create markets or trade — only price them.
 - Price unpriced markets first, then reprice existing ones as conditions change.
-- ORACLE SIGNALS: When you see "oracle: X%" in the market listing, that's ONE AI model's probability estimate. It's a useful reference but NOT gospel — think about why YOU might disagree. The oracle can be wrong. If it says UNDERPRICED or OVERPRICED, consider why the market might be right and the oracle wrong, OR adjust your price if you agree.
+- ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as one input among many — it can be wrong. Form your OWN view based on news and market activity.
 - RESOLUTION: If a market says RESOLVING or RESOLVED, IMMEDIATELY cancel your orders on it. Do NOT place new orders on resolving/resolved markets.`,
 
   trader: `As a TRADER, your job is to take positions on prediction markets — buy when you see value, sell when the thesis changes.
@@ -219,7 +213,7 @@ RULES:
 - side: "YES" or "NO" — which outcome you're trading. direction: "buy" or "sell".
 - Bigger size = higher conviction. But manage risk — don't put everything on one trade.
 - You CANNOT create or price markets — only trade.
-- ORACLE SIGNALS: When you see "oracle: X%" in the market listing, that's ONE AI model's probability estimate — a useful reference, not the answer. Think about WHY you agree or disagree. UNDERPRICED = oracle thinks YES is more likely than market price. OVERPRICED = oracle thinks YES is less likely. But the oracle can be wrong — your job is to form your OWN view.
+- ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as context but form your OWN view. The oracle can be wrong.
 - RESOLUTION: If a market says RESOLVING or RESOLVED, do NOT trade it. Cancel any open orders. Close positions if possible.`,
 };
 

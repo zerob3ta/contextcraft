@@ -254,90 +254,37 @@ async function syncOracleData(): Promise<void> {
     if (market.oracleUpdatedAt && Date.now() - market.oracleUpdatedAt < 60_000) continue;
 
     try {
-      // Fetch oracle quotes — has numeric probability, confidence, reasoning
-      let prob: number | null = null;
+      // Fetch oracle summary — qualitative reasoning only, no numeric probability
       let confidence: string | null = null;
       let summary: string | null = null;
+      let decision: string | null = null;
 
-      try {
-        const quotesResult = await client.markets.oracleQuotes(market.apiMarketId!);
-        const quotes = quotesResult?.quotes;
-        // Get most recent completed quote
-        const latest = quotes?.filter((q: { status: string }) => q.status === "completed")
-          .sort((a: { createdAt: string }, b: { createdAt: string }) => b.createdAt.localeCompare(a.createdAt))[0];
-        if (latest) {
-          prob = typeof latest.probability === "number" ? latest.probability : null;
-          confidence = latest.confidence || null;
-          summary = latest.reasoning?.slice(0, 150) || null;
-        }
-      } catch {
-        // oracleQuotes may not be available — fall back to oracle summary
-      }
-
-      // Fallback: use oracle summary endpoint for reasoning/decision text
       const oracleResult = await client.markets.oracle(market.apiMarketId!);
       const oracleData = oracleResult?.oracle;
       if (oracleData) {
-        // Use summary decision as fallback for probability
-        if (prob === null) {
-          const decisionText = oracleData.summary?.decision || "";
-          const probMatch = decisionText.match(/(\d+)\s*%/);
-          const isYes = /^yes/i.test(decisionText);
-          if (probMatch) {
-            const pct = parseInt(probMatch[1], 10);
-            prob = isYes ? pct / 100 : (100 - pct) / 100;
-          }
-        }
-        // Use summary endpoint for richer text
-        if (!summary) {
-          summary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 150) || null;
-        }
-        if (!confidence) {
-          confidence = oracleData.confidenceLevel || null;
-        }
+        decision = oracleData.summary?.decision || null;
+        summary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 200) || null;
+        confidence = oracleData.confidenceLevel || null;
       }
 
       {
-        const prevProb = market.oracleProb;
-        market.oracleProb = prob;
+        const prevSummary = market.oracleSummary;
+        market.oracleProb = null;  // no longer tracking numeric probability
         market.oracleConfidence = confidence;
         market.oracleSummary = summary;
+        market.oracleDivergence = null;  // no longer tracking divergence
         market.oracleUpdatedAt = Date.now();
 
         const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
 
-        // Publish oracle update to newsroom when probability changes meaningfully or first time
-        if (prob !== null) {
-          const oraclePct = Math.round(prob * 100);
-          const prevPct = prevProb !== null ? Math.round(prevProb * 100) : null;
-          const isNew = prevProb === null;
-          const movedEnough = prevPct !== null && Math.abs(oraclePct - prevPct) >= 3;
-
-          if (isNew || movedEnough) {
-            const moveStr = movedEnough ? ` (was ${prevPct}%)` : "";
-            const summaryStr = summary ? ` — ${summary.slice(0, 80)}` : "";
-            const headline = `Oracle update: "${shortQ}" at ${oraclePct}%${moveStr}${summaryStr}`;
-            state.addNews({ headline, snippet: summary || "", source: "Oracle", category: "Markets" });
-            broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
-            notifyBuildingEvent("newsroom");
-          }
-        }
-
-        // Compute divergence
-        if (prob !== null && market.fairValue !== null) {
-          const oraclePct = Math.round(prob * 100);
-          const marketPct = Math.round(market.fairValue * 100);
-          market.oracleDivergence = oraclePct - marketPct;
-
-          // Emit significant divergence as an exchange/pit signal
-          if (Math.abs(market.oracleDivergence) >= 10) {
-            const dir = market.oracleDivergence > 0 ? "underpriced" : "overpriced";
-            const headline = `Oracle signal: "${shortQ}" looks ${dir} by ${Math.abs(market.oracleDivergence)}pts (oracle: ${oraclePct}%, market: ${marketPct}%)`;
-            state.addNews({ headline, snippet: "", source: "Oracle", category: "Markets" });
-            broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
-            notifyBuildingEvent("newsroom");
-            notifyBuildingEvent("exchange");
-          }
+        // Publish oracle update to newsroom when summary changes
+        if (summary && summary !== prevSummary) {
+          const decisionStr = decision ? `${decision} — ` : "";
+          const confStr = confidence ? ` (${confidence} confidence)` : "";
+          const headline = `Oracle on "${shortQ}": ${decisionStr}${summary.slice(0, 100)}${confStr}`;
+          state.addNews({ headline, snippet: summary, source: "Oracle", category: "Markets" });
+          broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
+          notifyBuildingEvent("newsroom");
         }
       }
 
