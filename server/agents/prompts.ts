@@ -46,11 +46,19 @@ export function buildUserPrompt(
       parts.push(`USDC BALANCE: $${agent.usdcBalance.toFixed(2)}`);
     }
     if (agent.positions && agent.positions.length > 0) {
-      parts.push("YOUR POSITIONS:");
-      for (const p of agent.positions.slice(0, 5)) {
+      parts.push("YOUR POSITIONS (you can SELL these):");
+      for (const p of agent.positions.slice(0, 8)) {
         const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
         const label = m ? m.question.slice(0, 60) : "unknown market";
         parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" (avg ${Math.round(p.avgPrice * 100)}¢)`);
+      }
+    }
+    if (agent.openOrders && agent.openOrders.length > 0) {
+      parts.push("YOUR OPEN ORDERS (will be cancelled on next price/trade):");
+      for (const o of agent.openOrders.slice(0, 6)) {
+        const m = state.markets.get(o.marketId);
+        const label = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 40) : o.marketId;
+        parts.push(`  - ${o.side} ${o.size}x at ${o.price}¢ on "${label}"`);
       }
     }
   }
@@ -148,28 +156,29 @@ RULES:
 - Check the ACTIVE MARKETS list — if a market already exists for a game/event, do NOT create another one for the same matchup.
 - It's fine to speak, socialize, or move instead of creating if nothing compelling is happening. In fact, prefer chatting unless you have a genuinely unique market idea.`,
 
-  pricer: `As a PRICER, your job is to set fair values and spreads on markets. You should be ACTIVE — price every unpriced market you see.
+  pricer: `As a PRICER (market maker), your job is to provide liquidity on both sides of prediction markets.
 
 RULES:
-- Use "post_price" IMMEDIATELY when you see unpriced markets — don't waste turns just moving
-- Pick a specific unpriced market from the list and price it
-- fairValue (0.01–0.99) represents your estimated probability (0.35 = 35% YES)
-- spread (0.02–0.15) is your uncertainty buffer — wider when uncertain, tighter when confident
-- You CANNOT create markets or trade — only price them
-- When you reprice a market, SAY something about why (use "speak" action)
-- If there are unpriced markets, prefer "post_price". But socializing between pricing rounds is natural.`,
+- Use "post_price" to set your fair value and spread. This places orders on BOTH YES and NO orderbooks.
+- Every post_price CANCELS your previous orders and replaces them — reprice often as news/information changes.
+- fairValue (0.01–0.99) is your estimated probability. spread (0.02–0.15) is your edge.
+- REPRICE frequently: after news, after other pricers move, after your view changes. Stale quotes are bad.
+- Be aware of your INVENTORY (positions listed above). If you're long YES, tighten your YES ask to offload. If you're long NO, tighten your NO ask.
+- Widen your spread when uncertain, tighten when confident.
+- You CANNOT create markets or trade — only price them.
+- Price unpriced markets first, then reprice existing ones as conditions change.`,
 
-  trader: `As a TRADER, your job is to find and execute trades on priced markets. You should be AGGRESSIVE — trade whenever you have an opinion.
+  trader: `As a TRADER, your job is to take positions on prediction markets — buy when you see value, sell when the thesis changes.
 
 RULES:
-- Use "trade" IMMEDIATELY when you see priced markets — don't waste turns just moving
-- Pick a specific priced market from the list and trade it
-- You CANNOT create or price markets — only trade
-- Trade based on your personality: if you think the price is wrong, trade against it
-- Bigger size = higher conviction
-- ALWAYS trade if there is a priced market available. Say something about your thesis (use "speak" action).
-- Even if you agree with the price, you can still take a position on YES or NO based on your specialty and instincts.
-- Trade when you see opportunity, but it's fine to wait for the right setup.`,
+- You can BUY or SELL. Use direction "buy" to enter a position, "sell" to exit.
+- SELL positions when news invalidates your thesis, when you've hit your target, or when the market moves against you. Don't hold losing positions out of stubbornness.
+- Use "cancel_orders" to pull open orders when you change your mind or new info arrives.
+- Every trade CANCELS your existing orders on that market first, then places the new one.
+- Check YOUR POSITIONS above — don't buy more of something you're already max long on. Consider selling instead.
+- side: "YES" or "NO" — which outcome you're trading. direction: "buy" or "sell".
+- Bigger size = higher conviction. But manage risk — don't put everything on one trade.
+- You CANNOT create or price markets — only trade.`,
 };
 
 const ACTION_EXAMPLES: Record<string, string> = {
@@ -179,12 +188,13 @@ const ACTION_EXAMPLES: Record<string, string> = {
 {"action":"idle"}`,
 
   pricer: `{"action":"post_price","marketId":"M1","fairValue":0.35,"spread":0.04}
-{"action":"speak","message":"Fair value at 35 cents.","emotion":"neutral"}
-{"action":"post_price","marketId":"M2","fairValue":0.72,"spread":0.06}
+{"action":"post_price","marketId":"M1","fairValue":0.40,"spread":0.03}
+{"action":"speak","message":"Repricing — news shifted my view.","emotion":"neutral"}
 {"action":"idle"}`,
 
-  trader: `{"action":"trade","marketId":"M1","side":"YES","size":50}
-{"action":"speak","message":"Loading up!","emotion":"excited"}
-{"action":"trade","marketId":"M2","side":"NO","size":25}
+  trader: `{"action":"trade","marketId":"M1","side":"YES","size":50,"direction":"buy"}
+{"action":"trade","marketId":"M1","side":"YES","size":30,"direction":"sell"}
+{"action":"cancel_orders","marketId":"M2"}
+{"action":"speak","message":"Cutting my position — thesis invalidated.","emotion":"cautious"}
 {"action":"idle"}`,
 };

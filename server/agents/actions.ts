@@ -5,7 +5,8 @@ export type AgentAction =
   | { action: "speak"; message: string; emotion: Emotion }
   | { action: "create_market"; topic: string }
   | { action: "post_price"; marketId: string; fairValue: number; spread: number }
-  | { action: "trade"; marketId: string; side: "YES" | "NO"; size: number }
+  | { action: "trade"; marketId: string; side: "YES" | "NO"; size: number; direction: "buy" | "sell" }
+  | { action: "cancel_orders"; marketId: string }
   | { action: "idle" };
 
 const VALID_BUILDINGS: Set<string> = new Set(["newsroom", "workshop", "exchange", "pit", "lounge"]);
@@ -58,8 +59,16 @@ export function validateAction(raw: unknown, role: AgentRole): AgentAction {
       const marketId = String(obj.marketId || "");
       const side = obj.side === "NO" ? "NO" : "YES";
       const size = Math.max(1, Math.min(10000, Math.round(Number(obj.size) || 100)));
+      const direction = obj.direction === "sell" ? "sell" : "buy";
       if (!marketId) return { action: "idle" };
-      return { action: "trade", marketId, side, size };
+      return { action: "trade", marketId, side, size, direction };
+    }
+
+    case "cancel_orders": {
+      if (role !== "trader") return { action: "idle" };
+      const marketId = String(obj.marketId || "");
+      if (!marketId) return { action: "idle" };
+      return { action: "cancel_orders", marketId };
     }
 
     case "idle":

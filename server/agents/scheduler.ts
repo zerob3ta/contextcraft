@@ -7,7 +7,7 @@ import { draftMarket } from "../market/creator";
 import { runGroupChatTick, notifyBuildingEvent } from "./group-chat";
 import { isContextEnabled } from "../context-api/client";
 import { submitMarket, canCreateMarket } from "../context-api/markets";
-import { placePricingOrders, placeTrade } from "../context-api/trading";
+import { placePricingOrders, placeTrade, cancelOrders } from "../context-api/trading";
 import type { AgentMarketDraft } from "../context-api/types";
 import type { AgentState } from "../state";
 
@@ -190,34 +190,29 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       if (!market || market.fairValue === null) break;
 
       const size = clampTradeSize(agentId, action.size);
+      const dir = action.direction;
 
       state.moveAgent(agentId, "pit");
-      broadcast({ type: "agent_move", agentId, destination: "pit", reason: "Trading" });
+      broadcast({ type: "agent_move", agentId, destination: "pit", reason: dir === "sell" ? "Selling" : "Trading" });
 
-      // Use real API if available, otherwise local state
       if (isContextEnabled() && market.apiMarketId) {
-        const success = await placeTrade(agentId, action.marketId, action.side, size);
+        const success = await placeTrade(agentId, action.marketId, action.side, size, dir);
         if (!success) {
-          // Fall back to local trading
+          // Fall back to local
           const price = action.side === "YES"
             ? market.fairValue + (market.spread || 0.04) / 2
             : 1 - market.fairValue + (market.spread || 0.04) / 2;
-          const localSize = Math.min(size, 100); // match API cap
+          const localSize = Math.min(size, 100);
           const cost = Math.round(localSize * price * 100) / 100;
-          state.addTrade(action.marketId, agentId, action.side, localSize, price);
+          state.addTrade(action.marketId, agentId, action.side, dir === "sell" ? -localSize : localSize, price);
           broadcast({
-            type: "trade_executed",
-            agentId,
-            marketId: action.marketId,
-            side: action.side,
-            size: localSize,
-            price: Math.round(price * 100) / 100,
-            building: "pit",
-            question: market.question,
+            type: "trade_executed", agentId, marketId: action.marketId,
+            side: action.side, size: localSize,
+            price: Math.round(price * 100) / 100, building: "pit", question: market.question,
           });
           notifyBuildingEvent("pit");
           const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
-          state.addAction(agentId, `traded ${action.side}`, `$${cost} on ${shortQ}`);
+          state.addAction(agentId, `${dir === "sell" ? "sold" : "bought"} ${action.side}`, `$${cost} on ${shortQ}`);
         }
       } else {
         const price = action.side === "YES"
@@ -225,24 +220,30 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
           : 1 - market.fairValue + (market.spread || 0.04) / 2;
         const localSize = Math.min(size, 100);
         const cost = Math.round(localSize * price * 100) / 100;
-        state.addTrade(action.marketId, agentId, action.side, localSize, price);
+        state.addTrade(action.marketId, agentId, action.side, dir === "sell" ? -localSize : localSize, price);
         broadcast({
-          type: "trade_executed",
-          agentId,
-          marketId: action.marketId,
-          side: action.side,
-          size: localSize,
-          price: Math.round(price * 100) / 100,
-          building: "pit",
-          question: market.question,
+          type: "trade_executed", agentId, marketId: action.marketId,
+          side: action.side, size: localSize,
+          price: Math.round(price * 100) / 100, building: "pit", question: market.question,
         });
         notifyBuildingEvent("pit");
         const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
-        state.addAction(agentId, `traded ${action.side}`, `$${cost} on ${shortQ}`);
+        state.addAction(agentId, `${dir === "sell" ? "sold" : "bought"} ${action.side}`, `$${cost} on ${shortQ}`);
       }
 
       state.setAgentCooldown(agentId, 6_000);
       returnToLounge(agentId, 6_000);
+      break;
+    }
+
+    case "cancel_orders": {
+      const market = state.markets.get(action.marketId);
+      if (!market) break;
+
+      if (isContextEnabled() && market.apiMarketId) {
+        await cancelOrders(agentId, action.marketId);
+      }
+      state.addAction(agentId, "cancelled orders", market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40));
       break;
     }
 
@@ -388,7 +389,11 @@ function describeAction(_agent: AgentState, action: AgentAction): string {
     }
     case "trade": {
       const m = state.markets.get(action.marketId);
-      return `${action.side} $${action.size} on "${shortTitle(m?.question || "market")}"`;
+      return `${action.direction === "sell" ? "Sold" : "Bought"} ${action.side} $${action.size} on "${shortTitle(m?.question || "market")}"`;
+    }
+    case "cancel_orders": {
+      const m = state.markets.get(action.marketId);
+      return `Cancelled orders on "${shortTitle(m?.question || "market")}"`;
     }
     case "speak":
       return `Said: "${action.message.slice(0, 40)}"`;
