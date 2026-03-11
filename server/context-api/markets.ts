@@ -141,7 +141,7 @@ async function pollPendingCreations(): Promise<void> {
     // Don't poll too frequently
     if (now - pending.lastPollAt < POLL_INTERVAL_MS) continue;
     // Mark as polling to prevent duplicate processing
-    if ((pending as Record<string, unknown>)._processing) continue;
+    if ((pending as unknown as Record<string, unknown>)._processing) continue;
     pending.lastPollAt = now;
 
     try {
@@ -173,7 +173,7 @@ async function pollPendingCreations(): Promise<void> {
 
       if (status === "complete" || status === "completed" || status === "created") {
         // Prevent duplicate processing
-        (pending as Record<string, unknown>)._processing = true;
+        (pending as unknown as Record<string, unknown>)._processing = true;
 
         // If market already created
         if (data.market?.marketId) {
