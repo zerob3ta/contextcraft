@@ -9,6 +9,7 @@ import { broadcast } from "../ws-bridge";
 import { callMinimax, parseJsonAction } from "./brain";
 import type { Building } from "../../src/game/config/agents";
 import type { AgentState } from "../state";
+import { getChatGrounding } from "./grounding";
 
 // ── Types ──
 
@@ -41,7 +42,7 @@ const MAX_CHAT_LOG = 50;
 const CONVICTION_DIRECTIVE_THRESHOLD = 60;
 const CONVICTION_DECAY_PER_TICK = 3;
 const MOOD_DECAY_TICKS = 15; // extreme moods decay after 15 ticks without reinforcement
-const MAX_MESSAGE_LENGTH = 200;
+const MAX_MESSAGE_LENGTH = 120;
 
 // Where each role goes to fulfill directives
 const ROLE_WORK_BUILDINGS: Record<string, Building> = {
@@ -59,7 +60,14 @@ const BUILDING_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const BUILDING_CHAT_CONTEXT: Record<string, string> = {
-  newsroom: "Talk about breaking news and its market implications. React to headlines.",
+  lounge: `This is the LOUNGE — the off-duty hangout. NO shop talk here. Talk about:
+- Sports arguments, hot takes, trash talk
+- Politics, culture, random opinions
+- Personal stories, jokes, roasting each other
+- Tangential takes loosely inspired by the news
+- Life outside markets — what you'd do with your winnings, weekend plans
+Keep it fun, loose, and human. Argue about dumb stuff. Be opinionated.`,
+  newsroom: "React to breaking news. Debate what it means. You have exclusive access to the latest headlines here.",
   workshop: "Discuss which markets should be created. Debate market design and questions.",
   exchange: "Talk about pricing, fair values, spreads. Debate whether markets are mispriced.",
   pit: "Talk about trades, positions, and market moves. Trash-talk other traders' positions.",
@@ -440,9 +448,10 @@ async function generateMessage(agent: AgentState): Promise<GenerateResult | null
   const currentMood = getAgentMood(agent.id);
 
   const buildingName = BUILDING_DISPLAY_NAMES[agent.location] || agent.location;
-  const buildingContext = agent.location === "lounge"
-    ? "You are chatting in the Lounge — the main hangout where agents from all roles argue and discuss."
-    : `You are in the ${buildingName}. ${BUILDING_CHAT_CONTEXT[agent.location] || ""}`;
+  const buildingContext = BUILDING_CHAT_CONTEXT[agent.location] || "";
+
+  // Target length varies by mood and personality
+  const lengthGuide = getLengthGuide(agent, currentMood);
 
   const system = `You are ${agent.name}, a ${agent.role} in a prediction market town.
 PERSONALITY: ${agent.personality}
@@ -450,44 +459,49 @@ SPECIALTY: ${agent.specialty}
 CURRENT MOOD: ${currentMood}
 LOCATION: ${buildingName}
 
-${buildingContext} This is a group chat — be natural, reference others by name, agree or disagree.
+${buildingContext}
 
-MOOD AFFECTS YOUR TONE:
-- bullish: optimistic, forward-looking, "I like this setup"
-- bearish: skeptical, contrarian, "I'm not buying it"
-- uncertain: hedging, questions, "on the other hand..."
-- confident: declarative, authoritative, large conviction
-- scared: short cautious messages, "maybe we should wait"
-- manic: intense, ALL CAPS moments, aggressive takes
-- neutral: balanced, observational
+TONE (based on mood):
+- bullish: optimistic, "I like this"
+- bearish: skeptical, "not buying it"
+- uncertain: hedging, questions
+- confident: declarative, authoritative
+- scared: short, cautious
+- manic: intense, ALL CAPS moments
+- neutral: observational
 
 RULES:
-- Keep it SHORT. 1-2 sentences max. Think Twitter, not blog post.
-- Be direct — make your point and stop. No preamble, no hedging filler.
-- Reference markets or agents by name when relevant.
+- ${lengthGuide}
+- EVERY message must add something NEW — a new fact, a challenge, a different angle, or a joke. NEVER restate what someone just said.
+- If you agree with someone, say WHY in a new way, don't just echo them.
+- Read the last message carefully. Respond to IT specifically, not the general topic.
+- Reference agents by name. Be direct.
 - No emojis. Casual but sharp.
-- If replying to someone, include their message ID in replyTo.
+- ONLY reference markets that appear in the ACTIVE MARKETS list below. Do NOT invent or hallucinate market names.
+- If replying, include their message ID in replyTo.
 
 Respond with JSON:
 {
   "message": "your message",
   "mood": "bullish|bearish|uncertain|confident|scared|manic|neutral",
   "replyTo": "msg-id or null",
-  "conviction": { "marketId": "market-1", "marketName": "short name", "direction": "bullish|bearish", "strength": 0-100 } or null
+  "conviction": { "marketId": "M1", "marketName": "short name", "direction": "bullish|bearish", "strength": 0-100 } or null
 }
 
-Only include conviction if this conversation has genuinely shifted your view on a specific market. strength 0-40 = mild opinion, 40-70 = forming a thesis, 70-100 = ready to act.`;
+Only include conviction if this conversation genuinely shifted your view on a SPECIFIC ACTIVE market. strength 0-40 = mild, 40-70 = forming thesis, 70+ = ready to act.`;
 
   const parts: string[] = [];
   if (marketContext) parts.push(marketContext);
 
-  // Recent news
-  const news = state.getRecentNews(5);
-  if (news.length > 0) {
-    parts.push("\nRECENT NEWS:");
-    for (const n of news.slice(0, 3)) {
-      const ago = Math.round((Date.now() - n.timestamp) / 60_000);
-      parts.push(`- [${n.category}] ${n.headline} (${ago}min ago)`);
+  // News is ONLY available in the newsroom — other buildings get nothing
+  if (agent.location === "newsroom") {
+    const news = state.getRecentNews(5);
+    if (news.length > 0) {
+      parts.push("\nBREAKING NEWS (only you can see this — you're in the Newsroom):");
+      for (const n of news.slice(0, 5)) {
+        const ago = Math.round((Date.now() - n.timestamp) / 60_000);
+        parts.push(`- [${n.category}] ${n.headline} (${ago}min ago)`);
+      }
     }
   }
 
@@ -519,6 +533,13 @@ Only include conviction if this conversation has genuinely shifted your view on 
     recentArrivals.delete(agent.id);
   }
 
+  // Grounding: inject web search or local facts for newsroom/exchange
+  const recentMsgTexts = window.map((m) => m.message);
+  const grounding = await getChatGrounding(agent.location, recentMsgTexts);
+  if (grounding) {
+    parts.push(grounding);
+  }
+
   parts.push("\nJSON only.");
 
   try {
@@ -532,7 +553,18 @@ Only include conviction if this conversation has genuinely shifted your view on 
 
     if (!raw?.message) return null;
 
-    const message = raw.message.trim();
+    let message = raw.message.trim();
+
+    // Enforce max length
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      message = message.slice(0, MAX_MESSAGE_LENGTH);
+    }
+
+    // Similarity gate — reject parroting
+    if (isTooSimilar(message, chatLog)) {
+      console.log(`[Chat] ${agent.name}: rejected (too similar to recent)`);
+      return null;
+    }
 
     const validMoods: AgentMood[] = ["bullish", "bearish", "uncertain", "confident", "scared", "manic", "neutral"];
     const mood = validMoods.includes(raw.mood as AgentMood) ? (raw.mood as AgentMood) : currentMood;
@@ -561,6 +593,49 @@ Only include conviction if this conversation has genuinely shifted your view on 
   } catch {
     return null;
   }
+}
+
+// ── Length Variability ──
+
+function getLengthGuide(agent: AgentState, mood: AgentMood): string {
+  // Some agents are naturally terse, others more verbose
+  const terseAgents = ["ghost", "blitz", "anchor", "sage"];
+  const verboseAgents = ["degen", "spark", "volt"];
+  const isTerse = terseAgents.includes(agent.id);
+  const isVerbose = verboseAgents.includes(agent.id);
+
+  // Mood affects length
+  if (mood === "scared" || mood === "manic") {
+    return "Keep it VERY short. 3-8 words. Punchy reaction only.";
+  }
+  if (mood === "uncertain") {
+    return "Short — one sentence, maybe a trailing question. Under 60 characters.";
+  }
+  if (isTerse) {
+    return "Ultra brief. 5-15 words max. You're a person of few words.";
+  }
+  if (isVerbose && (mood === "bullish" || mood === "confident")) {
+    return "1-2 sentences. You can be slightly longer but still punchy. Under 100 characters.";
+  }
+  return "Keep it SHORT. One sentence, under 80 characters. Think text message, not paragraph.";
+}
+
+// ── Similarity Gate ──
+
+function isTooSimilar(newMessage: string, recentMessages: ChatMessage[]): boolean {
+  const newLower = newMessage.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+  const newWords = new Set(newLower.split(/\s+/).filter((w) => w.length > 3));
+
+  for (const msg of recentMessages.slice(0, 8)) {
+    const oldLower = msg.message.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+    const oldWords = new Set(oldLower.split(/\s+/).filter((w) => w.length > 3));
+
+    // Jaccard similarity on significant words
+    const intersection = [...newWords].filter((w) => oldWords.has(w)).length;
+    const union = new Set([...newWords, ...oldWords]).size;
+    if (union > 0 && intersection / union > 0.6) return true;
+  }
+  return false;
 }
 
 // ── Attention Window ──

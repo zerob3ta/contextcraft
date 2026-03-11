@@ -17,8 +17,11 @@ RESPONSE FORMAT: You MUST respond with a single JSON object (no markdown, no exp
 
 ${ACTION_EXAMPLES[agent.role]}
 
-IMPORTANT: You can take ANY action regardless of your current location. You do NOT need to move first — just act directly. Moving is purely cosmetic.
-Stay in character. Keep speech messages under 90 characters. Be concise and punchy.`;
+IMPORTANT:
+- You can take ANY action regardless of your current location. Moving is purely cosmetic.
+- ONLY reference markets that appear in the ACTIVE MARKETS list below. Do NOT invent or hallucinate market names or IDs.
+- Keep speech messages under 80 characters. Be concise and punchy.
+- Stay in character.`;
 }
 
 export function buildUserPrompt(

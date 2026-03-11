@@ -8,6 +8,7 @@ import { runGroupChatTick, notifyBuildingEvent } from "./group-chat";
 import { isContextEnabled } from "../context-api/client";
 import { submitMarket, canCreateMarket } from "../context-api/markets";
 import { placePricingOrders, placeTrade, cancelOrders } from "../context-api/trading";
+import { getJobGrounding } from "./grounding";
 import type { AgentMarketDraft } from "../context-api/types";
 import type { AgentState } from "../state";
 
@@ -94,7 +95,15 @@ async function runJobAgent(agentId: string): Promise<void> {
 
     const systemPrompt = buildSystemPrompt(agent);
     const sportsSlate = agent.role === "creator" ? state.sportsSlate : undefined;
-    const userPrompt = buildUserPrompt(agent, news, markets, marketNews, sportsSlate);
+    let userPrompt = buildUserPrompt(agent, news, markets, marketNews, sportsSlate);
+
+    // Smart grounding: inject web search or local context where it helps
+    const groundingTopic = extractGroundingTopic(agent, markets);
+    const marketQ = agent.directive?.match(/"([^"]+)"/)?.[1] || undefined;
+    const grounding = await getJobGrounding(agent.role, groundingTopic, marketQ);
+    if (grounding) {
+      userPrompt += "\n" + grounding;
+    }
 
     const response = await callMinimax(systemPrompt, userPrompt);
     const raw = parseJsonAction(response);
@@ -414,6 +423,41 @@ function returnToLounge(agentId: string, delayMs: number): void {
     state.moveAgent(agentId, "lounge");
     broadcast({ type: "agent_move", agentId, destination: "lounge", reason: "Returning to lounge" });
   }, delayMs);
+}
+
+/**
+ * Extract a grounding topic from the agent's current context.
+ * Uses directive, recent news, and market questions to decide what to search.
+ */
+function extractGroundingTopic(agent: AgentState, markets: ReturnType<typeof state.getActiveMarkets>): string {
+  // If agent has a directive, extract the topic from it
+  if (agent.directive) {
+    return agent.directive;
+  }
+
+  // For creators: use recent news topics
+  if (agent.role === "creator") {
+    const news = state.getRecentNews(3);
+    if (news.length > 0) {
+      return news[0].headline;
+    }
+  }
+
+  // For pricers/traders: use the first unpriced or recently active market
+  if (agent.role === "pricer") {
+    const unpriced = markets.find((m) => m.fairValue === null && m.apiMarketId);
+    if (unpriced) return unpriced.question;
+    const recent = markets[0];
+    if (recent) return recent.question;
+  }
+
+  if (agent.role === "trader") {
+    const recent = markets.find((m) => m.trades.length > 0);
+    if (recent) return recent.question;
+    if (markets[0]) return markets[0].question;
+  }
+
+  return "";
 }
 
 function sleep(ms: number): Promise<void> {

@@ -7,6 +7,7 @@ import { getAgentClient, getReadClient } from "./client";
 import { state } from "../state";
 import { broadcast } from "../ws-bridge";
 import { ALL_AGENTS } from "../../src/game/config/agents";
+import { notifyBuildingEvent } from "../agents/group-chat";
 
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
@@ -113,16 +114,36 @@ async function syncMarkets(): Promise<void> {
 
     let newCount = 0;
     for (const m of apiMarkets) {
-      // Skip if we already track this market
-      if (state.getMarketByApiId(m.id)) continue;
-
-      // Add as external market
       const question = m.question || m.shortQuestion || m.id;
-      // Extract yes price from outcome prices if available
       const yesPrice = m.outcomePrices?.find((op) => op.outcomeIndex === 1);
       // lastPrice is in raw units (e.g. 615000 = 61.5¢), divide by 10000 to get probability 0-1
       const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 10000 : null;
 
+      // Check if we already track this market
+      const existing = state.getMarketByApiId(m.id);
+      if (existing) {
+        // Update price if it changed significantly (>3¢ move)
+        if (fairValue !== null && existing.fairValue !== null) {
+          const oldCents = Math.round(existing.fairValue * 100);
+          const newCents = Math.round(fairValue * 100);
+          const delta = Math.abs(newCents - oldCents);
+          if (delta >= 3) {
+            state.updatePrice(existing.id, fairValue, existing.spread || 0);
+            const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+            const dir = newCents > oldCents ? "up" : "down";
+            const headline = `Oracle: "${shortQ}" moved ${dir} to ${newCents}¢ (was ${oldCents}¢)`;
+            state.addNews({ headline, snippet: "", source: "Oracle", category: "Markets" });
+            broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
+            notifyBuildingEvent("newsroom");
+            notifyBuildingEvent("exchange");
+          }
+        } else if (fairValue !== null && existing.fairValue === null) {
+          state.updatePrice(existing.id, fairValue, existing.spread || 0);
+        }
+        continue;
+      }
+
+      // Add as external market
       const localId = state.addExternalMarket({
         apiMarketId: m.id,
         question,
@@ -134,7 +155,6 @@ async function syncMarkets(): Promise<void> {
 
     if (newCount > 0) {
       console.log(`[Context Sync] Discovered ${newCount} new markets from testnet`);
-      // Broadcast market list update
       broadcast({
         type: "markets_synced",
         count: state.getActiveMarkets().length,
