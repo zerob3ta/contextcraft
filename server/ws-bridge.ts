@@ -1,12 +1,19 @@
 import { WebSocketServer, WebSocket } from "ws";
 
+export type AgentMood = "bullish" | "bearish" | "uncertain" | "confident" | "scared" | "manic" | "neutral";
+
 export type GameEvent =
   | { type: "agent_move"; agentId: string; destination: string; reason: string }
   | { type: "agent_speak"; agentId: string; message: string; emotion: string }
   | { type: "market_spawning"; marketId: string; question: string; creator: string }
   | { type: "price_update"; marketId: string; fairValue: number; spread: number }
   | { type: "trade_executed"; agentId: string; marketId: string; side: "YES" | "NO"; size: number; price: number }
-  | { type: "news_alert"; headline: string; source: string; severity: "breaking" | "normal" };
+  | { type: "news_alert"; headline: string; source: string; severity: "breaking" | "normal" }
+  | { type: "chat_message"; id: string; agentId: string; agentName: string; role: string; message: string; mood: AgentMood; replyTo: string | null; replyPreview: string | null }
+  | { type: "chat_directive"; agentId: string; agentName: string; directive: string; destination: string }
+  | { type: "mood_change"; agentId: string; agentName: string; oldMood: AgentMood; newMood: AgentMood }
+  | { type: "agent_directive"; agentId: string; directive: string }
+  | { type: "directive_fulfilled"; agentId: string; agentName: string; directive: string; result: string };
 
 let wss: WebSocketServer | null = null;
 

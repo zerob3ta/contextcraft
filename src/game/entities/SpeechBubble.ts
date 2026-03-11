@@ -15,13 +15,14 @@ const EMOTION_TEXT_COLORS: Record<Emotion, string> = {
   frustrated: "#7f1d1d",
 };
 
-const MAX_WIDTH = 220;
+const MAX_WIDTH = 250;
 const PADDING_X = 10;
 const PADDING_Y = 6;
 const TAIL_SIZE = 6;
 const BORDER_RADIUS = 4;
 const FONT_SIZE = 11;
 const LINE_HEIGHT = 14;
+const MAX_LINES = 4;
 const DISPLAY_DURATION = 6000;
 const FADE_DURATION = 500;
 const MAX_BUBBLES = 2;
@@ -30,6 +31,7 @@ export class SpeechBubble extends Phaser.GameObjects.Container {
   private bg: Phaser.GameObjects.Graphics;
   private label: Phaser.GameObjects.Text;
   private emotion: Emotion;
+  private convoColor: number | null;
   private fadeTimer?: Phaser.Time.TimerEvent;
   private bubbleHeight = 0;
 
@@ -38,10 +40,12 @@ export class SpeechBubble extends Phaser.GameObjects.Container {
     x: number,
     y: number,
     text: string,
-    emotion: Emotion
+    emotion: Emotion,
+    convoColor: number | null = null
   ) {
     super(scene, x, y);
     this.emotion = emotion;
+    this.convoColor = convoColor;
 
     this.label = scene.add
       .text(0, 0, text, {
@@ -117,10 +121,47 @@ export class SpeechBubble extends Phaser.GameObjects.Container {
       0,
       0
     );
+
+    // Conversation color accent — thin left bar
+    if (this.convoColor !== null) {
+      const accentW = 3;
+      this.bg.fillStyle(this.convoColor, 0.9);
+      this.bg.fillRoundedRect(
+        -w / 2,
+        -(h + TAIL_SIZE),
+        accentW,
+        h,
+        { tl: BORDER_RADIUS, bl: BORDER_RADIUS, tr: 0, br: 0 }
+      );
+    }
+  }
+
+  private clampLines(): void {
+    const maxHeight = MAX_LINES * LINE_HEIGHT;
+    const textBounds = this.label.getBounds();
+    if (textBounds.height > maxHeight) {
+      // Truncate by word until it fits within MAX_LINES
+      const words = this.label.text.split(" ");
+      while (words.length > 1) {
+        words.pop();
+        this.label.setText(words.join(" ") + "...");
+        if (this.label.getBounds().height <= maxHeight) break;
+      }
+      // Redraw bubble with clamped text
+      this.drawBubble();
+    }
   }
 
   getHeight(): number {
     return this.bubbleHeight;
+  }
+
+  getBubbleX(): number {
+    return this.x;
+  }
+
+  getBubbleY(): number {
+    return this.y;
   }
 
   fadeOut(): void {
@@ -153,14 +194,14 @@ export class SpeechBubbleManager {
     this.scene = scene;
   }
 
-  show(x: number, y: number, text: string, emotion: Emotion): void {
+  show(x: number, y: number, text: string, emotion: Emotion, convoColor: number | null = null): void {
     // Remove oldest if at max
     while (this.bubbles.length >= MAX_BUBBLES) {
       const oldest = this.bubbles.shift();
       oldest?.forceDestroy();
     }
 
-    const bubble = new SpeechBubble(this.scene, x, y, text, emotion);
+    const bubble = new SpeechBubble(this.scene, x, y, text, emotion, convoColor);
     this.bubbles.push(bubble);
 
     // Reposition stack

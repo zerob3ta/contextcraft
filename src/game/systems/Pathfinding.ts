@@ -8,23 +8,26 @@ interface Waypoint {
 }
 
 // Building entrance waypoints (centered below each building)
-// Shifted inward to match new building positions
+// Path locations are conversation-only spots at intersections
 const BUILDING_ENTRANCES: Record<Building, { x: number; y: number }> = {
-  newsroom: { x: 290, y: 220 },
-  workshop: { x: 290, y: 410 },
-  exchange: { x: 630, y: 230 },
-  pit: { x: 630, y: 400 },
-  lounge: { x: 830, y: 320 },
+  newsroom: { x: 175, y: 230 },
+  workshop: { x: 175, y: 510 },
+  exchange: { x: 545, y: 230 },
+  pit: { x: 545, y: 500 },
+  lounge: { x: 890, y: 370 },
+  path_left: { x: 175, y: 370 },
+  path_center: { x: 360, y: 370 },
+  path_right: { x: 545, y: 370 },
 };
 
 // Path intersection nodes
 const INTERSECTION_NODES = [
-  { id: "cross_center", x: 460, y: 320 },
-  { id: "cross_left", x: 290, y: 320 },
-  { id: "cross_right", x: 630, y: 320 },
-  { id: "cross_top", x: 460, y: 230 },
-  { id: "cross_bottom", x: 460, y: 400 },
-  { id: "lounge_junction", x: 740, y: 320 },
+  { id: "cross_center", x: 360, y: 370 },
+  { id: "cross_left", x: 175, y: 370 },
+  { id: "cross_right", x: 545, y: 370 },
+  { id: "cross_top", x: 360, y: 230 },
+  { id: "cross_bottom", x: 360, y: 500 },
+  { id: "lounge_junction", x: 720, y: 370 },
 ];
 
 function buildGraph(): Map<string, Waypoint> {
@@ -67,6 +70,11 @@ function buildGraph(): Map<string, Waypoint> {
   connect("bld_pit", "cross_right");
   connect("bld_pit", "cross_bottom");
   connect("bld_lounge", "lounge_junction");
+
+  // Path conversation spots — directly at their intersection nodes
+  connect("bld_path_left", "cross_left");
+  connect("bld_path_center", "cross_center");
+  connect("bld_path_right", "cross_right");
 
   return graph;
 }

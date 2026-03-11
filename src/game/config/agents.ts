@@ -1,6 +1,8 @@
 export type AgentRole = "creator" | "pricer" | "trader";
 
-export type Building = "newsroom" | "workshop" | "exchange" | "pit" | "lounge";
+export type RealBuilding = "newsroom" | "workshop" | "exchange" | "pit" | "lounge";
+export type PathLocation = "path_left" | "path_center" | "path_right";
+export type Building = RealBuilding | PathLocation;
 
 export type Emotion = "excited" | "cautious" | "neutral" | "frustrated";
 

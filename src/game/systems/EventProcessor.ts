@@ -68,11 +68,13 @@ export class EventProcessor {
         break;
 
       case "agent_speak":
-        this.scene.showSpeechBubble(event.agentId, event.message, event.emotion);
+        // No canvas bubbles — chat lives in HUD only
+        // Just mark agent as chatting briefly
+        this.scene.setAgentChatting(event.agentId);
         break;
 
       case "news_alert":
-        this.scene.showNewsAlert(event.headline, event.severity);
+        // Handled by HUD — no Phaser overlay needed
         break;
 
       case "market_spawning":
@@ -85,7 +87,19 @@ export class EventProcessor {
 
       case "trade_executed":
         this.scene.showTradeEffect(event.agentId);
-        // Also show a brief trade indicator speech
+        break;
+
+      case "chat_message":
+        // Chat lives in HUD panel — on canvas just show chatting state
+        this.scene.setAgentChatting(event.agentId);
+        break;
+
+      case "chat_directive":
+        // Handled by HUD — agent will move via agent_move event
+        break;
+
+      case "mood_change":
+        this.scene.setAgentMood(event.agentId, event.newMood);
         break;
     }
   }

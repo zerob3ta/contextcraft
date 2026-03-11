@@ -1,5 +1,6 @@
 import type { AgentState } from "../state";
 import type { Market, NewsItem } from "../state";
+import { state } from "../state";
 
 export function buildSystemPrompt(agent: AgentState): string {
   const roleInstructions = ROLE_PROMPTS[agent.role];
@@ -17,7 +18,7 @@ RESPONSE FORMAT: You MUST respond with a single JSON object (no markdown, no exp
 ${ACTION_EXAMPLES[agent.role]}
 
 IMPORTANT: You can take ANY action regardless of your current location. You do NOT need to move first — just act directly. Moving is purely cosmetic.
-Stay in character. Keep speech messages under 100 characters. Be concise and punchy.`;
+Stay in character. Keep speech messages under 90 characters. Be concise and punchy.`;
 }
 
 export function buildUserPrompt(
@@ -73,23 +74,40 @@ export function buildUserPrompt(
     }
   }
 
+  // Hard directive — if set, this is the agent's mandatory next action
+  if (agent.directive && agent.directiveUntil > Date.now()) {
+    parts.push(`\n⚠️ YOUR DIRECTIVE (mandatory — this is your next action):`);
+    parts.push(`→ ${agent.directive}`);
+    parts.push(`Execute this directive NOW. Do not take a different action unless the referenced market no longer exists.`);
+  } else {
+    // Soft insights from past conversations
+    const insights = state.getConversationInsights(agent.id);
+    if (insights.length > 0) {
+      parts.push("\nRECENT CONVERSATION CONTEXT:");
+      for (const i of insights) {
+        const ago = Math.round((Date.now() - i.ts) / 60_000);
+        parts.push(`- ${i.insight} (${ago} min ago)`);
+      }
+    }
+  }
+
   parts.push("\nWhat is your next action? Respond with a single JSON object.");
 
   return parts.join("\n");
 }
 
 const ROLE_PROMPTS: Record<string, string> = {
-  creator: `As a CREATOR, your job is to spot newsworthy topics and create prediction markets. You should be PROLIFIC — create markets aggressively whenever news gives you an angle.
+  creator: `As a CREATOR, your job is to spot newsworthy topics and create prediction markets.
 
 RULES:
-- When you see news, USE "create_market" IMMEDIATELY — don't waste turns just moving or speaking
 - You CANNOT trade or price markets — only create them
 - Don't create markets for things that already happened
 - Focus on your specialty but react to big breaking news too
 - IMPORTANT: Use today's date for time grounding. We are in 2026. Do NOT reference 2024 or 2025 as future.
 - Market topics should be specific and resolvable (e.g. "Will X happen by [date]?")
 - PRIORITY: When a game slate is available, create markets for SPECIFIC GAMES first (e.g. "Will Lakers beat Celtics tonight?", "Will Rangers score 4+ goals?"). Each game is its own market. Do NOT create vague aggregate markets like "how many upsets" — create matchup markets.
-- BIAS TOWARD ACTION: If there is ANY news and no market for it yet, create one. Prefer "create_market" over "move" or "speak".`,
+- Quality over quantity. Only create a market if it's genuinely interesting and tradeable. Ask yourself: would a real person want to bet on this? Is the outcome clear and resolvable?
+- It's fine to speak, socialize, or move instead of creating if nothing compelling is happening.`,
 
   pricer: `As a PRICER, your job is to set fair values and spreads on markets. You should be ACTIVE — price every unpriced market you see.
 
@@ -100,7 +118,7 @@ RULES:
 - spread (0.02–0.15) is your uncertainty buffer — wider when uncertain, tighter when confident
 - You CANNOT create markets or trade — only price them
 - When you reprice a market, SAY something about why (use "speak" action)
-- BIAS TOWARD ACTION: If there are unpriced markets, always use "post_price". Never idle when there's work to do.`,
+- If there are unpriced markets, prefer "post_price". But socializing between pricing rounds is natural.`,
 
   trader: `As a TRADER, your job is to find and execute trades on priced markets. You should be AGGRESSIVE — trade whenever you have an opinion.
 
@@ -112,7 +130,7 @@ RULES:
 - Bigger size = higher conviction
 - ALWAYS trade if there is a priced market available. Say something about your thesis (use "speak" action).
 - Even if you agree with the price, you can still take a position on YES or NO based on your specialty and instincts.
-- BIAS TOWARD ACTION: Never idle when there are priced markets. Always trade.`,
+- Trade when you see opportunity, but it's fine to wait for the right setup.`,
 };
 
 const ACTION_EXAMPLES: Record<string, string> = {

@@ -35,7 +35,7 @@ CRITICAL RULES:
 - RESPOND to what someone specific said. Use their name. Don't just broadcast your own take.
 - Do NOT repeat what others already said. If 3 people already reacted to the same news, talk about something ELSE or add a genuinely new angle.
 - Keep it conversational — questions, rebuttals, banter. Not press releases.
-- Under 120 chars. Punchy but complete — don't get cut off mid-sentence.
+- Under 90 chars. Punchy but complete — don't get cut off mid-sentence.
 
 Respond with JSON:
 - "message": what you say
@@ -111,7 +111,7 @@ export async function runSocialAgent(agentId: string): Promise<void> {
     const raw = parseJsonAction(response) as { message?: string; destination?: string } | null;
     if (!raw) return;
 
-    const message = typeof raw.message === "string" ? raw.message.trim().slice(0, 130) : null;
+    const message = typeof raw.message === "string" ? raw.message.trim() : null;
     const destination = typeof raw.destination === "string" && BUILDINGS.includes(raw.destination as Building)
       ? raw.destination as Building
       : null;

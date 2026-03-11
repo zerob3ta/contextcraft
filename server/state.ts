@@ -38,6 +38,8 @@ export interface AgentState {
   lastActionAt: number;
   lastSpoke: string;
   cooldownUntil: number;
+  directive: string | null;       // current action item from conversation
+  directiveUntil: number;         // when directive expires
 }
 
 // ─── Global State ───
@@ -52,6 +54,10 @@ class ServerState {
   // Social context — recent speeches and actions for agent-to-agent interaction
   recentSpeeches: { agentId: string; message: string; ts: number }[] = [];
   recentActions: { agentId: string; action: string; detail: string; ts: number }[] = [];
+
+  // Conversation insights (legacy, used by job prompts)
+  conversationInsights: Map<string, { insight: string; ts: number }[]> = new Map();
+  lastMarketCreatedAt = 0; // global cooldown for market creation
 
   addSpeech(agentId: string, message: string): void {
     this.recentSpeeches.unshift({ agentId, message, ts: Date.now() });
@@ -92,6 +98,12 @@ class ServerState {
   private nextMarketId = 1;
 
   constructor() {
+    const roleLocations: Record<string, Building> = {
+      creator: "newsroom",
+      pricer: "exchange",
+      trader: "pit",
+    };
+
     for (const cfg of ALL_AGENTS) {
       this.agents.set(cfg.id, {
         id: cfg.id,
@@ -99,10 +111,12 @@ class ServerState {
         role: cfg.role,
         personality: cfg.personality,
         specialty: cfg.specialty,
-        location: "lounge",
+        location: roleLocations[cfg.role] || "lounge",
         lastActionAt: 0,
         lastSpoke: "",
         cooldownUntil: 0,
+        directive: null,
+        directiveUntil: 0,
       });
     }
   }
@@ -113,13 +127,13 @@ class ServerState {
     const key = item.headline.toLowerCase().trim();
     if (this.seenHeadlines.has(key)) return null;
 
-    // Fuzzy dedup — check word overlap against recent headlines
+    // Fuzzy dedup — check word overlap against recent headlines (only very close matches)
     const words = new Set(key.replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean));
-    if (words.size >= 3) {
-      for (const existing of this.newsBuffer.slice(0, 30)) {
+    if (words.size >= 4) {
+      for (const existing of this.newsBuffer.slice(0, 20)) {
         const eWords = new Set(existing.headline.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean));
         const overlap = [...words].filter((w) => eWords.has(w)).length;
-        if (overlap / Math.max(words.size, eWords.size) > 0.45) return null;
+        if (overlap / Math.max(words.size, eWords.size) > 0.65) return null;
       }
     }
 
@@ -131,7 +145,7 @@ class ServerState {
       timestamp: Date.now(),
     };
     this.newsBuffer.unshift(newsItem);
-    if (this.newsBuffer.length > 50) this.newsBuffer.length = 50;
+    if (this.newsBuffer.length > 100) this.newsBuffer.length = 100;
     return newsItem;
   }
 
@@ -203,6 +217,23 @@ class ServerState {
   setAgentCooldown(agentId: string, ms: number): void {
     const a = this.agents.get(agentId);
     if (a) a.cooldownUntil = Date.now() + ms;
+  }
+
+  // ── Conversation insights ──
+
+  addConversationInsight(agentId: string, insight: string): void {
+    if (!this.conversationInsights.has(agentId)) {
+      this.conversationInsights.set(agentId, []);
+    }
+    const insights = this.conversationInsights.get(agentId)!;
+    insights.unshift({ insight, ts: Date.now() });
+    if (insights.length > 5) insights.length = 5;
+  }
+
+  getConversationInsights(agentId: string, limit = 3): { insight: string; ts: number }[] {
+    const insights = this.conversationInsights.get(agentId) || [];
+    const cutoff = Date.now() - 10 * 60_000; // last 10 min
+    return insights.filter((i) => i.ts > cutoff).slice(0, limit);
   }
 
   // ── Dedup helpers ──

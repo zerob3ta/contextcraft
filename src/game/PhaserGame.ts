@@ -33,14 +33,14 @@ export function createPhaserGame(
   const game = new Phaser.Game({
     type: Phaser.CANVAS,
     width: 1280,
-    height: 720,
+    height: 900,
     parent: parentElement,
     backgroundColor: "#1a1a2e",
     pixelArt: true,
     antialias: false,
     roundPixels: true,
     scale: {
-      mode: Phaser.Scale.FIT,
+      mode: Phaser.Scale.RESIZE,
       autoCenter: Phaser.Scale.CENTER_BOTH,
     },
     scene: TownScene,

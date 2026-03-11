@@ -16,32 +16,20 @@ const GameCanvas = dynamic(() => import("../components/GameCanvas"), {
 
 export default function Home() {
   return (
-    <div className="w-screen h-screen bg-[#0f0f1a] overflow-hidden relative flex items-center justify-center">
-      {/* Logo */}
-      <div className="absolute top-3 left-3 z-20 flex items-center gap-2">
-        <div className="font-pixel text-[10px] text-white/70 tracking-wider">
-          ContextCraft
-        </div>
-        <div className="text-[9px] text-white/20">AI Market Town</div>
-      </div>
-
-      {/* Game canvas container — centered, maintains 1280x720 aspect ratio */}
-      <div
-        className="relative w-full h-full"
-        style={{
-          maxWidth: "1280px",
-          maxHeight: "720px",
-          aspectRatio: "1280 / 720",
-        }}
-      >
-        {/* Phaser canvas */}
-        <div className="absolute inset-0">
+    <div className="w-screen h-screen bg-[#0f0f1a] overflow-hidden flex flex-col">
+      <HUD>
+        {/* This is the center slot — Phaser canvas lives here */}
+        <div className="relative w-full h-full">
+          {/* Logo */}
+          <div className="absolute top-2 left-2 z-20 flex items-center gap-2">
+            <div className="font-pixel text-[10px] text-white/70 tracking-wider">
+              ContextCraft
+            </div>
+            <div className="text-[9px] text-white/20">AI Market Town</div>
+          </div>
           <GameCanvas />
         </div>
-
-        {/* React HUD overlay */}
-        <HUD />
-      </div>
+      </HUD>
     </div>
   );
 }

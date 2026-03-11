@@ -1,5 +1,8 @@
 import { Building, Emotion } from "./agents";
 
+/** Agent mood types */
+export type AgentMood = "bullish" | "bearish" | "uncertain" | "confident" | "scared" | "manic" | "neutral";
+
 /** Events the game engine processes to animate agents */
 export type GameEvent =
   | {
@@ -39,12 +42,48 @@ export type GameEvent =
       headline: string;
       source: string;
       severity: "breaking" | "normal";
+    }
+  | {
+      type: "chat_message";
+      id: string;
+      agentId: string;
+      agentName: string;
+      role: string;
+      message: string;
+      mood: AgentMood;
+      replyTo: string | null;
+      replyPreview: string | null; // "AgentName: truncated message..."
+    }
+  | {
+      type: "chat_directive";
+      agentId: string;
+      agentName: string;
+      directive: string;
+      destination: string;
+    }
+  | {
+      type: "mood_change";
+      agentId: string;
+      agentName: string;
+      oldMood: AgentMood;
+      newMood: AgentMood;
+    }
+  | {
+      type: "agent_directive";
+      agentId: string;
+      directive: string;
+    }
+  | {
+      type: "directive_fulfilled";
+      agentId: string;
+      agentName: string;
+      directive: string;
+      result: string;
     };
 
 /** Pre-scripted demo timeline — runs on load so the town is alive immediately */
 export const DEMO_TIMELINE: { delayMs: number; event: GameEvent }[] = [
-  // === Agents start in the lounge ===
-  // 0s: Everyone is chilling in the lounge
+  // === Agents start spread out: creators@newsroom, pricers@exchange, traders@pit ===
 
   // 2s: Creators stir
   {

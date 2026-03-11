@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import type { AgentConfig, Emotion } from "../config/agents";
+import type { AgentMood } from "../config/events";
 import { SpeechBubbleManager } from "./SpeechBubble";
 
 // Scale factor: 1 "pixel" in our sprite = this many canvas pixels
@@ -12,18 +13,56 @@ const HEIGHT_MAP: Record<string, number> = {
   large: 18,
 };
 
+// Mood emoji mapping
+const MOOD_EMOJI: Record<AgentMood, string> = {
+  bullish: "🐂",
+  bearish: "🐻",
+  uncertain: "🤔",
+  confident: "😎",
+  scared: "😰",
+  manic: "🤪",
+  neutral: "",
+};
+
+// Mood glow colors
+const MOOD_GLOW: Record<AgentMood, number> = {
+  bullish: 0x4ade80,
+  bearish: 0xf87171,
+  uncertain: 0xfacc15,
+  confident: 0x60a5fa,
+  scared: 0x6b7280,
+  manic: 0xa78bfa,
+  neutral: 0x000000,
+};
+
+// Agent visual state
+export type AgentState = "idle" | "chatting" | "working";
+
 export class Agent extends Phaser.GameObjects.Container {
   public agentId: string;
   public config: AgentConfig;
 
   private sprite: Phaser.GameObjects.Graphics;
   private nameLabel: Phaser.GameObjects.Text;
+  private directiveLabel: Phaser.GameObjects.Text;
   private bubbleManager: SpeechBubbleManager;
   private idleTween?: Phaser.Tweens.Tween;
   private walkTween?: Phaser.Tweens.Tween;
   private spriteHeight: number;
   private isMoving = false;
   private baseY = 0;
+  private convoColor: number | null = null;
+
+  // Mood system
+  private currentMood: AgentMood = "neutral";
+  private moodBubble?: Phaser.GameObjects.Container;
+  private moodBubbleTween?: Phaser.Tweens.Tween;
+  private moodGlow?: Phaser.GameObjects.Graphics;
+
+  // State indicator
+  private agentState: AgentState = "idle";
+  private stateIndicator?: Phaser.GameObjects.Graphics;
+  private stateDotTween?: Phaser.Tweens.Tween;
 
   constructor(scene: Phaser.Scene, config: AgentConfig, x: number, y: number) {
     super(scene, x, y);
@@ -47,6 +86,20 @@ export class Agent extends Phaser.GameObjects.Container {
       })
       .setOrigin(0.5, 0);
     this.add(this.nameLabel);
+
+    this.directiveLabel = scene.add
+      .text(0, this.spriteHeight / 2 + 12, "", {
+        fontSize: "7px",
+        fontFamily: "monospace",
+        color: config.color,
+        align: "center",
+        stroke: "#0f172a",
+        strokeThickness: 2,
+        wordWrap: { width: 120 },
+      })
+      .setOrigin(0.5, 0)
+      .setAlpha(0);
+    this.add(this.directiveLabel);
 
     this.setDepth(100);
     scene.add.existing(this);
@@ -253,7 +306,12 @@ export class Agent extends Phaser.GameObjects.Container {
 
   showSpeech(text: string, emotion: Emotion): void {
     const bubbleY = this.y - this.spriteHeight / 2 - 12;
-    this.bubbleManager.show(this.x, bubbleY, text, emotion);
+    this.bubbleManager.show(this.x, bubbleY, text, emotion, this.convoColor);
+  }
+
+  showSpeechOffset(text: string, emotion: Emotion, offsetX: number): void {
+    const bubbleY = this.y - this.spriteHeight / 2 - 12;
+    this.bubbleManager.show(this.x + offsetX, bubbleY, text, emotion, this.convoColor);
   }
 
   showTradeEffect(): void {
@@ -297,6 +355,333 @@ export class Agent extends Phaser.GameObjects.Container {
       timer.destroy();
       particles.destroy();
     });
+  }
+
+  setConvoColor(color: number | null): void {
+    this.convoColor = color;
+    // Add/remove a subtle colored underline indicator
+    if (color !== null) {
+      this.nameLabel.setColor(`#${color.toString(16).padStart(6, "0")}`);
+    } else {
+      this.nameLabel.setColor("#e2e8f0");
+    }
+  }
+
+  getConvoColor(): number | null {
+    return this.convoColor;
+  }
+
+  setDirective(directive: string): void {
+    if (!directive) {
+      if (this.directiveLabel.alpha > 0) {
+        this.scene.tweens.add({
+          targets: this.directiveLabel,
+          alpha: 0,
+          duration: 300,
+        });
+      }
+      return;
+    }
+    // Truncate for display
+    const display = directive.length > 35 ? directive.slice(0, 33) + "..." : directive;
+    this.directiveLabel.setText(`→ ${display}`);
+    this.scene.tweens.add({
+      targets: this.directiveLabel,
+      alpha: 0.8,
+      duration: 300,
+    });
+  }
+
+  showActionToast(result: string): void {
+    const ROLE_COLORS: Record<string, number> = {
+      creator: 0xa78bfa,
+      pricer: 0x22d3ee,
+      trader: 0xfb923c,
+    };
+
+    const roleColor = ROLE_COLORS[this.config.role] || 0x94a3b8;
+
+    // Create a distinct action toast — no tail, dark bg, role-colored accent
+    const container = this.scene.add.container(this.x, this.y - this.spriteHeight / 2 - 16);
+    container.setDepth(1001);
+    container.setAlpha(0);
+
+    const label = this.scene.add.text(0, 0, `✦ ${result}`, {
+      fontSize: "10px",
+      fontFamily: "monospace",
+      color: "#e2e8f0",
+      wordWrap: { width: 200 },
+      lineSpacing: 2,
+    }).setOrigin(0.5, 1);
+
+    const bounds = label.getBounds();
+    const padX = 10;
+    const padY = 6;
+    const w = Math.max(bounds.width + padX * 2, 60);
+    const h = bounds.height + padY * 2;
+    const accentW = 3;
+
+    label.setPosition(accentW / 2, -(padY));
+
+    const bg = this.scene.add.graphics();
+    // Dark background
+    bg.fillStyle(0x1e293b, 0.95);
+    bg.fillRoundedRect(-w / 2, -(h), w, h, 4);
+    // Border
+    bg.lineStyle(1, roleColor, 0.4);
+    bg.strokeRoundedRect(-w / 2, -(h), w, h, 4);
+    // Role-colored left accent
+    bg.fillStyle(roleColor, 0.9);
+    bg.fillRoundedRect(-w / 2, -(h), accentW, h, { tl: 4, bl: 4, tr: 0, br: 0 });
+
+    container.add(bg);
+    container.add(label);
+    this.scene.add.existing(container);
+
+    // Fade in
+    this.scene.tweens.add({
+      targets: container,
+      alpha: 1,
+      y: container.y - 8,
+      duration: 300,
+      ease: "Back.easeOut",
+    });
+
+    // Fade out after 8s
+    this.scene.time.delayedCall(8000, () => {
+      this.scene.tweens.add({
+        targets: container,
+        alpha: 0,
+        y: container.y - 12,
+        duration: 500,
+        ease: "Cubic.easeIn",
+        onComplete: () => container.destroy(),
+      });
+    });
+  }
+
+  // ── Mood System ──────────────────────────────────────────
+
+  setMood(mood: AgentMood): void {
+    if (mood === this.currentMood) return;
+    const oldMood = this.currentMood;
+    this.currentMood = mood;
+
+    // Update glow ring
+    this.updateMoodGlow(mood);
+
+    // Update thought bubble (emoji)
+    this.updateMoodBubble(mood);
+
+    // Flash the name label in mood color briefly
+    if (mood !== "neutral") {
+      const glowColor = MOOD_GLOW[mood];
+      const hex = `#${glowColor.toString(16).padStart(6, "0")}`;
+      this.nameLabel.setColor(hex);
+      this.scene.time.delayedCall(3000, () => {
+        if (this.currentMood === mood) {
+          this.nameLabel.setColor(this.convoColor
+            ? `#${this.convoColor.toString(16).padStart(6, "0")}`
+            : "#e2e8f0"
+          );
+        }
+      });
+    }
+  }
+
+  getMood(): AgentMood {
+    return this.currentMood;
+  }
+
+  private updateMoodGlow(mood: AgentMood): void {
+    if (this.moodGlow) {
+      this.moodGlow.destroy();
+      this.moodGlow = undefined;
+    }
+
+    if (mood === "neutral") return;
+
+    const glow = this.scene.add.graphics();
+    const glowColor = MOOD_GLOW[mood];
+    const size = this.spriteHeight;
+
+    // Soft glow ellipse beneath the character
+    glow.fillStyle(glowColor, 0.15);
+    glow.fillEllipse(0, (size / 2) + 4, size * 1.2, 8);
+
+    // Subtle ring around character
+    glow.lineStyle(1, glowColor, 0.3);
+    glow.strokeEllipse(0, 0, size * 0.8, size * 1.1);
+
+    this.add(glow);
+    this.moodGlow = glow;
+    // Send to back of container so it's behind sprite
+    this.sendToBack(glow);
+
+    // Auto-fade after 15s (moods decay)
+    this.scene.time.delayedCall(15000, () => {
+      if (this.moodGlow === glow) {
+        this.scene.tweens.add({
+          targets: glow,
+          alpha: 0,
+          duration: 2000,
+          onComplete: () => {
+            glow.destroy();
+            if (this.moodGlow === glow) this.moodGlow = undefined;
+          },
+        });
+      }
+    });
+  }
+
+  private updateMoodBubble(mood: AgentMood): void {
+    // Remove existing bubble
+    if (this.moodBubble) {
+      if (this.moodBubbleTween) {
+        this.moodBubbleTween.stop();
+        this.moodBubbleTween = undefined;
+      }
+      this.moodBubble.destroy();
+      this.moodBubble = undefined;
+    }
+
+    const emoji = MOOD_EMOJI[mood];
+    if (!emoji) return; // neutral = no bubble
+
+    const bubbleY = -this.spriteHeight / 2 - 20;
+
+    const container = this.scene.add.container(0, bubbleY);
+    container.setDepth(150);
+
+    // Tiny thought bubble background
+    const bg = this.scene.add.graphics();
+    bg.fillStyle(0xffffff, 0.85);
+    bg.fillRoundedRect(-10, -8, 20, 16, 6);
+    // Small thought dots
+    bg.fillStyle(0xffffff, 0.6);
+    bg.fillCircle(-4, 10, 2);
+    bg.fillCircle(-2, 14, 1.5);
+
+    const emojiText = this.scene.add.text(0, 0, emoji, {
+      fontSize: "11px",
+      fontFamily: "monospace",
+    }).setOrigin(0.5, 0.5);
+
+    container.add(bg);
+    container.add(emojiText);
+    this.add(container);
+    container.setAlpha(0);
+
+    // Pop in
+    this.scene.tweens.add({
+      targets: container,
+      alpha: 1,
+      y: bubbleY - 4,
+      duration: 300,
+      ease: "Back.easeOut",
+    });
+
+    // Gentle float
+    this.moodBubbleTween = this.scene.tweens.add({
+      targets: container,
+      y: bubbleY - 7,
+      duration: 1500,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
+    });
+
+    this.moodBubble = container;
+
+    // Fade out after 10s
+    this.scene.time.delayedCall(10000, () => {
+      if (this.moodBubble === container) {
+        this.scene.tweens.add({
+          targets: container,
+          alpha: 0,
+          duration: 1000,
+          onComplete: () => {
+            if (this.moodBubbleTween) {
+              this.moodBubbleTween.stop();
+              this.moodBubbleTween = undefined;
+            }
+            container.destroy();
+            if (this.moodBubble === container) this.moodBubble = undefined;
+          },
+        });
+      }
+    });
+  }
+
+  // ── State Indicator ─────────────────────────────────────
+
+  setAgentState(state: AgentState): void {
+    if (state === this.agentState) return;
+    this.agentState = state;
+    this.updateStateIndicator();
+  }
+
+  getAgentState(): AgentState {
+    return this.agentState;
+  }
+
+  private updateStateIndicator(): void {
+    if (this.stateIndicator) {
+      if (this.stateDotTween) {
+        this.stateDotTween.stop();
+        this.stateDotTween = undefined;
+      }
+      this.stateIndicator.destroy();
+      this.stateIndicator = undefined;
+    }
+
+    const g = this.scene.add.graphics();
+    const dotY = -this.spriteHeight / 2 - 6;
+
+    switch (this.agentState) {
+      case "chatting": {
+        // Three animated dots (typing indicator)
+        g.fillStyle(0x4ade80, 0.8);
+        g.fillCircle(-4, dotY, 1.5);
+        g.fillCircle(0, dotY, 1.5);
+        g.fillCircle(4, dotY, 1.5);
+        // Pulse animation
+        this.stateDotTween = this.scene.tweens.add({
+          targets: g,
+          alpha: 0.4,
+          duration: 600,
+          yoyo: true,
+          repeat: -1,
+          ease: "Sine.easeInOut",
+        });
+        break;
+      }
+      case "working": {
+        // Wrench/gear icon — small spinning indicator
+        g.fillStyle(0xfbbf24, 0.9);
+        g.fillRect(-3, dotY - 1, 2, 2);
+        g.fillRect(1, dotY - 1, 2, 2);
+        g.fillRect(-1, dotY - 3, 2, 2);
+        g.fillRect(-1, dotY + 1, 2, 2);
+        // Slow pulse
+        this.stateDotTween = this.scene.tweens.add({
+          targets: g,
+          alpha: 0.5,
+          duration: 1200,
+          yoyo: true,
+          repeat: -1,
+          ease: "Sine.easeInOut",
+        });
+        break;
+      }
+      case "idle":
+        // No indicator for idle
+        g.destroy();
+        return;
+    }
+
+    this.add(g);
+    this.stateIndicator = g;
   }
 
   getPosition(): { x: number; y: number } {

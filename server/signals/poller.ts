@@ -25,19 +25,19 @@ export function startPoller(): void {
 
   // Stagger loop starts to avoid thundering herd
   scheduleLoop("espn-daily-slate", loop1_dailySlate, 0, 4 * 60 * 60_000);     // every 4h, start immediately
-  scheduleLoop("espn-live-scores", loop2_liveScores, 30_000, 15 * 60_000);     // every 15m
-  scheduleLoop("espn-headlines", loop3_espnHeadlines, 60_000, 22 * 60_000);    // every 22m
-  scheduleLoop("drudge", loop4_drudge, 90_000, 60 * 60_000);                   // every 1h
-  scheduleLoop("cnn-breaking", loop5_cnnBreaking, 120_000, 30 * 60_000);       // every 30m
-  scheduleLoop("crypto-prices", loop6_cryptoPrices, 150_000, 15 * 60_000);     // every 15m (background)
-  scheduleLoop("crypto-news", loop7_cryptoNews, 180_000, 60 * 60_000);         // every 1h
-  scheduleLoop("finance-x", loop8_financeX, 210_000, 15 * 60_000);            // every 15m
-  scheduleLoop("cnn-culture", loop9_cnnCulture, 240_000, 60 * 60_000);        // every 1h
-  scheduleLoop("vulture", loop10_vulture, 270_000, 60 * 60_000);              // every 1h
-  scheduleLoop("ew", loop11_ew, 300_000, 60 * 60_000);                        // every 1h
-  scheduleLoop("weather", loop12_weather, 330_000, 6 * 60 * 60_000);          // every 6h
-  scheduleLoop("hackernews", loop13_hackernews, 360_000, 60 * 60_000);        // every 1h
-  scheduleLoop("techmeme", loop14_techmeme, 390_000, 60 * 60_000);            // every 1h
+  scheduleLoop("espn-live-scores", loop2_liveScores, 30_000, 5 * 60_000);      // every 5m
+  scheduleLoop("espn-headlines", loop3_espnHeadlines, 60_000, 10 * 60_000);    // every 10m
+  scheduleLoop("drudge", loop4_drudge, 90_000, 15 * 60_000);                   // every 15m
+  scheduleLoop("cnn-breaking", loop5_cnnBreaking, 120_000, 10 * 60_000);       // every 10m
+  scheduleLoop("crypto-prices", loop6_cryptoPrices, 150_000, 10 * 60_000);     // every 10m
+  scheduleLoop("crypto-news", loop7_cryptoNews, 180_000, 20 * 60_000);         // every 20m
+  scheduleLoop("finance-x", loop8_financeX, 210_000, 8 * 60_000);             // every 8m
+  scheduleLoop("cnn-culture", loop9_cnnCulture, 240_000, 30 * 60_000);        // every 30m
+  scheduleLoop("vulture", loop10_vulture, 270_000, 30 * 60_000);              // every 30m
+  scheduleLoop("ew", loop11_ew, 300_000, 30 * 60_000);                        // every 30m
+  scheduleLoop("weather", loop12_weather, 330_000, 2 * 60 * 60_000);          // every 2h
+  scheduleLoop("hackernews", loop13_hackernews, 360_000, 15 * 60_000);        // every 15m
+  scheduleLoop("techmeme", loop14_techmeme, 390_000, 15 * 60_000);            // every 15m
 }
 
 export function stopPoller(): void {

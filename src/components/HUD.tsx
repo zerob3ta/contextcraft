@@ -9,7 +9,7 @@ import {
   type AgentConfig,
   type AgentRole,
 } from "../game/config/agents";
-import type { GameEvent } from "../game/config/events";
+import type { AgentMood, GameEvent } from "../game/config/events";
 import { gameEventBus } from "../lib/gameEventBus";
 import AgentInspector from "./AgentInspector";
 
@@ -25,19 +25,48 @@ interface MarketState {
   spread: number | null;
   lastPriceDirection: "up" | "down" | null;
   createdAt: number;
-}
-
-interface ActivityEntry {
-  id: number;
-  text: string;
-  agentColor: string;
-  timestamp: number;
+  recentActions: { agentName: string; action: string; ts: number }[];
 }
 
 interface SpeechEntry {
   message: string;
   timestamp: number;
 }
+
+// ---------------------------------------------------------------------------
+// Chat message types for the unified group chat stream
+// ---------------------------------------------------------------------------
+
+interface ChatMsg {
+  id: string;
+  type: "message" | "directive" | "mood_change" | "activity" | "news";
+  agentId?: string;
+  agentName?: string;
+  role?: string;
+  message: string;
+  mood?: AgentMood;
+  replyTo?: string | null;
+  replyPreview?: string | null;
+  directive?: string;
+  destination?: string;
+  oldMood?: AgentMood;
+  newMood?: AgentMood;
+  timestamp: number;
+}
+
+// ---------------------------------------------------------------------------
+// Mood colors
+// ---------------------------------------------------------------------------
+
+const MOOD_COLORS: Record<AgentMood, string> = {
+  bullish: "#4ade80",
+  bearish: "#f87171",
+  uncertain: "#facc15",
+  confident: "#60a5fa",
+  scared: "#6b7280",
+  manic: "#a78bfa",
+  neutral: "#6b7280",
+};
 
 // ---------------------------------------------------------------------------
 // Role color helpers
@@ -47,12 +76,6 @@ const ROLE_COLORS: Record<AgentRole, string> = {
   creator: "#c4b5fd",
   pricer: "#67e8f9",
   trader: "#fb923c",
-};
-
-const ROLE_DOT: Record<AgentRole, string> = {
-  creator: "bg-purple-400",
-  pricer: "bg-cyan-400",
-  trader: "bg-orange-400",
 };
 
 // ---------------------------------------------------------------------------
@@ -67,28 +90,17 @@ interface NewsItem {
   arrivedAt: number;
 }
 
-type NewsPhase = "breaking" | "active" | "stale";
-
-function getNewsPhase(item: NewsItem, now: number): NewsPhase {
-  const age = now - item.arrivedAt;
-  if (item.severity === "breaking" && age < 5 * 60_000) return "breaking";
-  if (age < 30 * 60_000) return "active";
-  return "stale";
-}
-
 // ---------------------------------------------------------------------------
-// BreakingTicker — top bar, ONLY breaking news, slow scroll
+// BreakingTicker — top bar
 // ---------------------------------------------------------------------------
 
-const TICKER_PX_PER_SEC = 40; // constant scroll speed
+const TICKER_PX_PER_SEC = 40;
 
 function BreakingTicker({ items }: { items: NewsItem[] }) {
-  // Show the latest 8 headlines (all types), newest first
   const recent = items.slice().reverse().slice(0, 8);
   const contentRef = useRef<HTMLDivElement>(null);
   const [duration, setDuration] = useState(60);
 
-  // Measure content width and compute duration for constant speed
   useEffect(() => {
     if (!contentRef.current || recent.length === 0) return;
     const el = contentRef.current;
@@ -142,7 +154,7 @@ function BreakingTicker({ items }: { items: NewsItem[] }) {
 }
 
 // ---------------------------------------------------------------------------
-// BreakingBanner — full-width overlay, 5s fade on new breaking news
+// BreakingBanner
 // ---------------------------------------------------------------------------
 
 function BreakingBanner({ items }: { items: NewsItem[] }) {
@@ -180,86 +192,6 @@ function BreakingBanner({ items }: { items: NewsItem[] }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// NewsFeed — scrollable right-rail feed with lifecycle phases
-// ---------------------------------------------------------------------------
-
-function NewsFeed({ items }: { items: NewsItem[] }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [now, setNow] = useState(Date.now());
-
-  // Refresh phases every 30s
-  useEffect(() => {
-    const i = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(i);
-  }, []);
-
-  // Auto-scroll to top on new items
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = 0;
-    }
-  }, [items.length]);
-
-  const visible = items.filter((i) => getNewsPhase(i, now) !== "stale");
-
-  return (
-    <div className="space-y-1.5">
-      <div className="font-pixel text-[8px] text-red-400/70 uppercase tracking-widest px-1">
-        News Feed
-      </div>
-      {visible.length === 0 ? (
-        <div className="text-[10px] text-white/20 italic px-1">
-          Awaiting news...
-        </div>
-      ) : (
-        <div
-          ref={scrollRef}
-          className="space-y-1 max-h-[200px] overflow-y-auto hud-scroll"
-        >
-          {visible
-            .slice()
-            .reverse()
-            .map((item) => {
-              const phase = getNewsPhase(item, now);
-              return (
-                <div
-                  key={item.id}
-                  className={`px-2 py-1.5 rounded animate-news-in ${
-                    phase === "breaking"
-                      ? "bg-red-500/10 border border-red-500/20"
-                      : "bg-white/[0.03]"
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 mb-0.5">
-                    {phase === "breaking" && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse flex-shrink-0" />
-                    )}
-                    <span className="text-[9px] text-white/30">{item.source}</span>
-                    <span className="text-[8px] text-white/15 ml-auto">
-                      {formatAge(item.arrivedAt, now)}
-                    </span>
-                  </div>
-                  <div
-                    className={`text-[11px] leading-snug ${
-                      phase === "breaking"
-                        ? "text-red-200 font-medium"
-                        : phase === "active"
-                        ? "text-white/60"
-                        : "text-white/30"
-                    }`}
-                  >
-                    {item.headline}
-                  </div>
-                </div>
-              );
-            })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function formatAge(arrivedAt: number, now: number): string {
   const sec = Math.floor((now - arrivedAt) / 1000);
   if (sec < 60) return "just now";
@@ -276,13 +208,17 @@ function AgentDot({
   agent,
   status,
   active,
+  directive,
   onClick,
 }: {
   agent: AgentConfig;
   status: string;
   active: boolean;
+  directive?: string;
   onClick: () => void;
 }) {
+  const hasDirective = !!directive;
+
   return (
     <button
       onClick={onClick}
@@ -306,9 +242,15 @@ function AgentDot({
       >
         {agent.name}
       </span>
-      <span className="text-[8px] text-white/25 ml-auto truncate max-w-[50px]">
-        {status}
-      </span>
+      {hasDirective ? (
+        <span className="text-[8px] text-cyan-400/70 ml-auto truncate max-w-[70px]" title={directive}>
+          → {status}
+        </span>
+      ) : (
+        <span className="text-[8px] text-white/25 ml-auto truncate max-w-[50px]">
+          {status}
+        </span>
+      )}
     </button>
   );
 }
@@ -316,10 +258,12 @@ function AgentDot({
 function AgentRoster({
   agentLocations,
   activeAgents,
+  agentDirectives,
   onSelectAgent,
 }: {
   agentLocations: Record<string, string>;
   activeAgents: Set<string>;
+  agentDirectives: Record<string, string>;
   onSelectAgent: (agent: AgentConfig) => void;
 }) {
   const groups: { label: string; color: string; agents: AgentConfig[] }[] = [
@@ -345,6 +289,7 @@ function AgentRoster({
                 agent={agent}
                 status={agentLocations[agent.id] || "lounge"}
                 active={activeAgents.has(agent.id)}
+                directive={agentDirectives[agent.id]}
                 onClick={() => onSelectAgent(agent)}
               />
             ))}
@@ -356,162 +301,301 @@ function AgentRoster({
 }
 
 // ---------------------------------------------------------------------------
-// MarketBoard
+// ChatStream — unified group chat panel (#the-lounge)
 // ---------------------------------------------------------------------------
 
-function MarketCard({ market }: { market: MarketState }) {
-  const creator = ALL_AGENTS.find((a) => a.id === market.creator);
-  const priceClass =
-    market.lastPriceDirection === "up"
-      ? "animate-flash-green"
-      : market.lastPriceDirection === "down"
-      ? "animate-flash-red"
-      : "";
+function ChatAvatar({ agentId }: { agentId: string }) {
+  const agent = ALL_AGENTS.find((a) => a.id === agentId);
+  const color = agent?.color || "#888";
+  const initial = agent?.name?.[0] || "?";
 
   return (
-    <div className="bg-white/5 rounded-md p-2.5 border border-white/5 animate-slide-in">
-      <div className="text-[11px] text-white/80 leading-relaxed mb-1.5">
-        {market.question}
+    <div
+      className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-black/70 flex-shrink-0"
+      style={{ backgroundColor: color }}
+    >
+      {initial}
+    </div>
+  );
+}
+
+function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: ChatMsg[] }) {
+  const agent = msg.agentId ? ALL_AGENTS.find((a) => a.id === msg.agentId) : null;
+  const agentColor = agent?.color || "#888";
+
+  // --- Mood change ---
+  if (msg.type === "mood_change") {
+    return (
+      <div className="flex justify-center py-1.5">
+        <span className="text-[10px] text-white/30">
+          {msg.agentName} mood shifted:{" "}
+          <span style={{ color: msg.oldMood ? MOOD_COLORS[msg.oldMood] : "#6b7280" }}>
+            {msg.oldMood}
+          </span>
+          {" → "}
+          <span style={{ color: msg.newMood ? MOOD_COLORS[msg.newMood] : "#6b7280" }}>
+            {msg.newMood}
+          </span>
+        </span>
       </div>
-      <div className="flex items-center justify-between">
-        {market.fairValue !== null ? (
-          <div className={`font-mono text-sm text-white font-bold ${priceClass}`}>
-            {Math.round(market.fairValue * 100)}c
-            {market.spread !== null && (
-              <span className="text-[10px] text-white/30 font-normal ml-1">
-                +/-{Math.round(market.spread * 100)}c
+    );
+  }
+
+  // --- Breaking news ---
+  if (msg.type === "news") {
+    return (
+      <div className="mx-2 my-1.5 rounded-md bg-amber-500/10 border border-amber-500/20 px-3 py-2">
+        <div className="flex items-center gap-1.5 mb-0.5">
+          <span className="font-pixel text-[8px] text-amber-400 bg-amber-400/15 px-1.5 py-0.5 rounded uppercase">
+            Breaking
+          </span>
+        </div>
+        <div className="text-[11px] text-amber-200 leading-snug">{msg.message}</div>
+      </div>
+    );
+  }
+
+  // --- Activity (trades, market creation, pricing, directive fulfillment) ---
+  if (msg.type === "activity") {
+    const lower = msg.message.toLowerCase();
+    const isTrade = lower.includes("bought") || lower.includes("yes $") || lower.includes("no $");
+    const isMarket = lower.includes("created market") || lower.includes("created:");
+    const isPrice = lower.includes("priced");
+
+    let label: string;
+    let labelColor: string;
+    let bgColor: string;
+    if (isTrade) {
+      label = "TRADE";
+      labelColor = "#fb923c";
+      bgColor = "rgba(251, 146, 60, 0.06)";
+    } else if (isMarket) {
+      label = "CREATE";
+      labelColor = "#c4b5fd";
+      bgColor = "rgba(196, 181, 253, 0.06)";
+    } else if (isPrice) {
+      label = "PRICE";
+      labelColor = "#67e8f9";
+      bgColor = "rgba(103, 232, 249, 0.06)";
+    } else {
+      label = "TRADE";
+      labelColor = "#fb923c";
+      bgColor = "rgba(251, 146, 60, 0.06)";
+    }
+
+    return (
+      <div className="px-3 py-1.5">
+        <div className="flex items-start gap-2 rounded px-2.5 py-1.5" style={{ backgroundColor: bgColor }}>
+          <span
+            className="text-[8px] font-bold uppercase tracking-wider mt-px flex-shrink-0"
+            style={{ color: labelColor }}
+          >
+            {label}
+          </span>
+          <span className="text-[10px] text-white/60 leading-snug">
+            {msg.message}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Directive ---
+  if (msg.type === "directive") {
+    return (
+      <div className="flex gap-2 px-3 py-1.5">
+        <ChatAvatar agentId={msg.agentId || ""} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-[11px] font-semibold" style={{ color: agentColor }}>
+              {msg.agentName}
+            </span>
+            {agent && (
+              <span className="text-[8px] uppercase tracking-wide text-white/25">
+                {agent.role}
+              </span>
+            )}
+            <span className="text-[8px] text-white/15 ml-auto flex-shrink-0">
+              {formatAge(msg.timestamp, Date.now())}
+            </span>
+          </div>
+          <div className="text-[11px] text-[#e8e6e1]/70 leading-snug mt-0.5">
+            {msg.message}
+          </div>
+          {/* Directive action bar */}
+          <div className="flex items-center gap-1.5 mt-1">
+            <span className="text-[8px] font-pixel uppercase tracking-wide text-cyan-400 bg-cyan-400/10 px-1.5 py-0.5 rounded">
+              Directive
+            </span>
+            <span className="text-[9px] text-white/40">{msg.directive}</span>
+            {msg.destination && (
+              <span className="text-[9px] text-white/25">
+                {"-->"} {msg.destination}
               </span>
             )}
           </div>
-        ) : (
-          <div className="text-[10px] text-yellow-400/60 font-pixel">
-            AWAITING PRICE
-          </div>
-        )}
-        {creator && (
-          <div className="flex items-center gap-1">
-            <div
-              className="w-2 h-2 rounded-full"
-              style={{ backgroundColor: creator.color }}
-            />
-            <span className="text-[9px] text-white/30">{creator.name}</span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function MarketBoard({ markets }: { markets: MarketState[] }) {
-  return (
-    <div className="space-y-2">
-      <div className="font-pixel text-[8px] text-cyan-400/70 uppercase tracking-widest px-1">
-        Markets
-      </div>
-      {markets.length === 0 ? (
-        <div className="text-[10px] text-white/20 italic px-1">
-          No active markets
         </div>
-      ) : (
-        <div className="space-y-1.5 max-h-[300px] overflow-y-auto hud-scroll">
-          {markets.map((m) => (
-            <MarketCard key={m.id} market={m} />
-          ))}
+      </div>
+    );
+  }
+
+  // --- Regular / reply message ---
+  // Find reply reference
+  let replyRef: { agentName: string; preview: string; color: string } | null = null;
+  if (msg.replyTo) {
+    // Use the replyPreview from the event if available
+    if (msg.replyPreview) {
+      // replyPreview format: "AgentName: truncated message..."
+      const colonIdx = msg.replyPreview.indexOf(":");
+      const refName = colonIdx > 0 ? msg.replyPreview.slice(0, colonIdx) : msg.replyPreview;
+      const refText = colonIdx > 0 ? msg.replyPreview.slice(colonIdx + 1).trim() : "";
+      const refAgent = ALL_AGENTS.find((a) => a.name === refName);
+      replyRef = {
+        agentName: refName,
+        preview: refText,
+        color: refAgent?.color || "#888",
+      };
+    } else {
+      // Fallback: look up the original message
+      const original = allMessages.find((m) => m.id === msg.replyTo);
+      if (original) {
+        const origAgent = original.agentId ? ALL_AGENTS.find((a) => a.id === original.agentId) : null;
+        replyRef = {
+          agentName: original.agentName || "Unknown",
+          preview: original.message.slice(0, 60),
+          color: origAgent?.color || "#888",
+        };
+      }
+    }
+  }
+
+  return (
+    <div className="px-3 py-1.5">
+      {/* Reply reference bar */}
+      {replyRef && (
+        <div className="pl-8 mb-1">
+          <div
+            className="flex items-center gap-1.5 pl-2 text-[9px] text-white/30"
+            style={{ borderLeft: `2px solid ${replyRef.color}` }}
+          >
+            <span style={{ color: replyRef.color }}>@{replyRef.agentName}</span>
+            <span className="truncate">{replyRef.preview}</span>
+          </div>
         </div>
       )}
+      <div className="flex gap-2">
+        <ChatAvatar agentId={msg.agentId || ""} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-[11px] font-semibold" style={{ color: agentColor }}>
+              {msg.agentName}
+            </span>
+            {agent && (
+              <span className="text-[8px] uppercase tracking-wide text-white/25">
+                {agent.role}
+              </span>
+            )}
+            <span className="text-[8px] text-white/15 ml-auto flex-shrink-0">
+              {formatAge(msg.timestamp, Date.now())}
+            </span>
+          </div>
+          <div className="text-[11px] text-[#e8e6e1]/70 leading-snug mt-0.5">
+            {msg.message}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// ActivityFeed
-// ---------------------------------------------------------------------------
-
-function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
+function ChatStream({
+  messages,
+  chattingCount,
+}: {
+  messages: ChatMsg[];
+  chattingCount: number;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Always scroll to bottom on new messages
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [entries]);
+    const el = scrollRef.current;
+    if (!el) return;
+    // Use rAF to ensure DOM has rendered
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [messages.length]);
 
   return (
-    <div className="space-y-1">
-      <div className="font-pixel text-[8px] text-white/30 uppercase tracking-widest px-1">
-        Activity
+    <div className="flex flex-col" style={{ height: "100%", minHeight: 0 }}>
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5" style={{ flexShrink: 0 }}>
+        <span className="text-[13px] font-semibold text-[#e8e6e1]"># the-lounge</span>
+        <div className="flex items-center gap-1 ml-auto">
+          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          <span className="text-[9px] text-white/40">{chattingCount} in lounge</span>
+        </div>
       </div>
-      <div
-        ref={scrollRef}
-        className="space-y-0.5 max-h-[120px] overflow-y-auto hud-scroll"
-      >
-        {entries.length === 0 ? (
-          <div className="text-[10px] text-white/15 italic px-1">
-            Waiting for action...
-          </div>
-        ) : (
-          entries.slice(-20).map((entry) => (
-            <div
-              key={entry.id}
-              className="flex items-start gap-1.5 text-[10px] animate-slide-up px-1"
-            >
-              <div
-                className="w-1.5 h-1.5 rounded-full mt-1 flex-shrink-0"
-                style={{ backgroundColor: entry.agentColor }}
-              />
-              <span className="text-white/50 leading-relaxed">
-                {entry.text}
-              </span>
-              <span className="text-white/15 ml-auto flex-shrink-0 text-[9px]">
-                {formatTime(entry.timestamp)}
-              </span>
+
+      {/* Messages — absolute positioning to guarantee scroll works */}
+      <div className="relative" style={{ flex: "1 1 0%", minHeight: 0 }}>
+        <div
+          ref={scrollRef}
+          className="absolute inset-0 overflow-y-auto hud-scroll py-1"
+        >
+          {messages.length === 0 ? (
+            <div className="text-[10px] text-white/20 italic px-3 pt-4">
+              Agents are gathering in the lounge...
             </div>
-          ))
-        )}
+          ) : (
+            messages.map((msg) => (
+              <ChatMessageItem key={msg.id} msg={msg} allMessages={messages} />
+            ))
+          )}
+        </div>
       </div>
     </div>
   );
-}
-
-function formatTime(ts: number): string {
-  const s = Math.floor(ts / 1000);
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
 // ---------------------------------------------------------------------------
 // Main HUD
 // ---------------------------------------------------------------------------
 
-export default function HUD() {
+export default function HUD({ children }: { children?: React.ReactNode }) {
   const startTime = useRef(Date.now());
-  const nextActivityId = useRef(0);
   const nextNewsId = useRef(0);
+  const nextChatId = useRef(0);
 
   // State
   const [agentLocations, setAgentLocations] = useState<Record<string, string>>(
     () => {
       const locs: Record<string, string> = {};
-      for (const a of ALL_AGENTS) locs[a.id] = "lounge";
+      const roleLocations: Record<string, string> = { creator: "newsroom", pricer: "exchange", trader: "pit" };
+      for (const a of ALL_AGENTS) locs[a.id] = roleLocations[a.role] || "lounge";
       return locs;
     }
   );
   const [activeAgents, setActiveAgents] = useState<Set<string>>(new Set());
   const [markets, setMarkets] = useState<MarketState[]>([]);
-  const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [newsItems, setNewsItems] = useState<NewsItem[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentConfig | null>(null);
   const [agentSpeeches, setAgentSpeeches] = useState<
     Record<string, SpeechEntry[]>
   >({});
-
-  const getAgentColor = useCallback((agentId: string): string => {
-    return ALL_AGENTS.find((a) => a.id === agentId)?.color || "#888";
-  }, []);
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [agentDirectives, setAgentDirectives] = useState<Record<string, string>>({});
+  const [agentMoods, setAgentMoods] = useState<Record<string, AgentMood>>({});
+  // Track which agents have been active recently (for "X chatting" count)
+  const [chattingAgents, setChattingAgents] = useState<Set<string>>(new Set());
 
   const getAgentName = useCallback((agentId: string): string => {
     return ALL_AGENTS.find((a) => a.id === agentId)?.name || agentId;
+  }, []);
+
+  const getAgentRole = useCallback((agentId: string): string => {
+    return ALL_AGENTS.find((a) => a.id === agentId)?.role || "unknown";
   }, []);
 
   const elapsed = useCallback(
@@ -519,23 +603,25 @@ export default function HUD() {
     []
   );
 
-  const addActivity = useCallback(
-    (text: string, agentColor: string) => {
-      setActivities((prev) => {
-        const next = [
-          ...prev,
-          {
-            id: nextActivityId.current++,
-            text,
-            agentColor,
-            timestamp: elapsed(),
-          },
-        ];
-        return next.slice(-30); // keep last 30
+  const addChatMessage = useCallback((msg: Omit<ChatMsg, "id">) => {
+    const id = `chat-${nextChatId.current++}`;
+    setChatMessages((prev) => [...prev, { ...msg, id }].slice(-100));
+  }, []);
+
+  const markAgentChatting = useCallback((agentId: string) => {
+    setChattingAgents((prev) => {
+      const next = new Set(prev);
+      next.add(agentId);
+      return next;
+    });
+    setTimeout(() => {
+      setChattingAgents((prev) => {
+        const next = new Set(prev);
+        next.delete(agentId);
+        return next;
       });
-    },
-    [elapsed]
-  );
+    }, 10_000);
+  }, []);
 
   // Subscribe to game events
   useEffect(() => {
@@ -546,7 +632,6 @@ export default function HUD() {
             ...prev,
             [event.agentId]: event.destination,
           }));
-          // Mark active briefly
           setActiveAgents((prev) => {
             const next = new Set(prev);
             next.add(event.agentId);
@@ -559,10 +644,6 @@ export default function HUD() {
               return next;
             });
           }, 4000);
-          addActivity(
-            `${getAgentName(event.agentId)} → ${event.destination}`,
-            getAgentColor(event.agentId)
-          );
           break;
         }
 
@@ -586,16 +667,68 @@ export default function HUD() {
               { message: event.message, timestamp: elapsed() },
             ].slice(-10),
           }));
-          addActivity(
-            `${getAgentName(event.agentId)}: "${event.message}"`,
-            getAgentColor(event.agentId)
-          );
+          // Also add to chat stream so job speak actions appear inline
+          markAgentChatting(event.agentId);
+          addChatMessage({
+            type: "message",
+            agentId: event.agentId,
+            agentName: getAgentName(event.agentId),
+            role: getAgentRole(event.agentId),
+            message: event.message,
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
+        case "chat_message": {
+          markAgentChatting(event.agentId);
+          if (event.mood) {
+            setAgentMoods((prev) => ({ ...prev, [event.agentId]: event.mood }));
+          }
+          addChatMessage({
+            type: "message",
+            agentId: event.agentId,
+            agentName: event.agentName,
+            role: event.role,
+            message: event.message,
+            mood: event.mood,
+            replyTo: event.replyTo,
+            replyPreview: event.replyPreview,
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
+        case "chat_directive": {
+          markAgentChatting(event.agentId);
+          addChatMessage({
+            type: "directive",
+            agentId: event.agentId,
+            agentName: event.agentName,
+            message: `Heading to ${event.destination}`,
+            directive: event.directive,
+            destination: event.destination,
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
+        case "mood_change": {
+          setAgentMoods((prev) => ({ ...prev, [event.agentId]: event.newMood }));
+          addChatMessage({
+            type: "mood_change",
+            agentId: event.agentId,
+            agentName: event.agentName,
+            message: "",
+            oldMood: event.oldMood,
+            newMood: event.newMood,
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case "market_spawning": {
           setMarkets((prev) => {
-            // Prevent duplicate markets from double-firing
             if (prev.some((m) => m.id === event.marketId)) return prev;
             return [
               ...prev,
@@ -607,21 +740,26 @@ export default function HUD() {
                 spread: null,
                 lastPriceDirection: null,
                 createdAt: elapsed(),
+                recentActions: [],
               },
             ];
           });
-          addActivity(
-            `New market: ${event.question}`,
-            getAgentColor(event.creator)
-          );
+          const creatorName = getAgentName(event.creator);
+          addChatMessage({
+            type: "activity",
+            agentId: event.creator,
+            agentName: creatorName,
+            message: `${creatorName} created market: "${event.question}"`,
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case "price_update": {
-          setMarkets((prev) =>
-            prev.map((m) => {
+          setMarkets((prev) => {
+            const updated = prev.map((m) => {
               if (m.id !== event.marketId) return m;
-              const dir =
+              const dir: "up" | "down" | null =
                 m.fairValue === null
                   ? null
                   : event.fairValue > m.fairValue
@@ -632,20 +770,48 @@ export default function HUD() {
                 fairValue: event.fairValue,
                 spread: event.spread,
                 lastPriceDirection: dir,
+                recentActions: [
+                  ...m.recentActions,
+                  {
+                    agentName: "Pricer",
+                    action: `priced at ${Math.round(event.fairValue * 100)}c`,
+                    ts: Date.now(),
+                  },
+                ].slice(-4),
               };
-            })
-          );
-          addActivity(
-            `${event.marketId} priced at ${Math.round(event.fairValue * 100)}c`,
-            "#67e8f9"
-          );
+            });
+            // Add price update to chat stream with market name
+            const market = prev.find((m) => m.id === event.marketId);
+            if (market) {
+              const shortQ = market.question.length > 50 ? market.question.slice(0, 47) + "..." : market.question;
+              addChatMessage({
+                type: "activity",
+                message: `"${shortQ}" priced at ${Math.round(event.fairValue * 100)}¢ (spread ${Math.round(event.spread * 100)}¢)`,
+                timestamp: Date.now(),
+              });
+            }
+            return updated;
+          });
           break;
         }
 
         case "trade_executed": {
-          addActivity(
-            `${getAgentName(event.agentId)} ${event.side} ${event.size}@${Math.round(event.price * 100)}c on ${event.marketId}`,
-            getAgentColor(event.agentId)
+          const traderName = getAgentName(event.agentId);
+          setMarkets((prev) =>
+            prev.map((m) => {
+              if (m.id !== event.marketId) return m;
+              return {
+                ...m,
+                recentActions: [
+                  ...m.recentActions,
+                  {
+                    agentName: traderName,
+                    action: `bought ${event.side} $${event.size}`,
+                    ts: Date.now(),
+                  },
+                ].slice(-4),
+              };
+            })
           );
           setActiveAgents((prev) => {
             const next = new Set(prev);
@@ -659,93 +825,137 @@ export default function HUD() {
               return next;
             });
           }, 3000);
+          // Look up market name for the trade
+          setMarkets((currentMarkets) => {
+            const market = currentMarkets.find((m) => m.id === event.marketId);
+            const marketQ = market ? market.question : event.marketId;
+            const shortQ = marketQ.length > 50 ? marketQ.slice(0, 47) + "..." : marketQ;
+            addChatMessage({
+              type: "activity",
+              agentId: event.agentId,
+              agentName: traderName,
+              message: `${traderName} bought ${event.side} $${event.size} at ${Math.round(event.price * 100)}¢ on "${shortQ}"`,
+              timestamp: Date.now(),
+            });
+            return currentMarkets; // no mutation
+          });
           break;
         }
 
         case "news_alert": {
+          const newsId = nextNewsId.current++;
           setNewsItems((prev) => {
             const next = [
               ...prev,
               {
-                id: nextNewsId.current++,
+                id: newsId,
                 headline: event.headline,
                 source: event.source,
                 severity: event.severity,
                 arrivedAt: Date.now(),
               },
             ];
-            // keep last 30, drop stale (>30min)
             const cutoff = Date.now() - 30 * 60_000;
             return next.filter((n) => n.arrivedAt > cutoff).slice(-30);
           });
+          // Add breaking news to chat stream
           if (event.severity === "breaking") {
-            addActivity(
-              `[${event.source}] ${event.headline}`,
-              "#ef4444"
-            );
+            addChatMessage({
+              type: "news",
+              message: event.headline,
+              timestamp: Date.now(),
+            });
           }
+          break;
+        }
+
+        case "agent_directive": {
+          setAgentDirectives((p) => ({ ...p, [event.agentId]: event.directive }));
+          if (event.directive) {
+            const agentIdCopy = event.agentId;
+            setTimeout(() => {
+              setAgentDirectives((p) => {
+                const n = { ...p };
+                delete n[agentIdCopy];
+                return n;
+              });
+            }, 30_000);
+          }
+          break;
+        }
+
+        case "directive_fulfilled": {
+          // Clear directive
+          setAgentDirectives((p) => {
+            const n = { ...p };
+            delete n[event.agentId];
+            return n;
+          });
+          // Add activity result to chat stream
+          const fulfilledAgent = ALL_AGENTS.find((a) => a.id === event.agentId);
+          addChatMessage({
+            type: "activity",
+            agentId: event.agentId,
+            agentName: fulfilledAgent?.name || event.agentName,
+            message: `${fulfilledAgent?.name || event.agentName} ${event.result}`,
+            timestamp: Date.now(),
+          });
           break;
         }
       }
     });
 
-    // Demo timeline is managed by GameCanvas — only starts if WS fails.
-    // HUD just listens for events via the bus.
-
     return () => {
       unsub();
     };
-  }, [addActivity, elapsed, getAgentColor, getAgentName]);
+  }, [elapsed, getAgentName, getAgentRole, addChatMessage, markAgentChatting]);
 
   return (
-    <div className="absolute inset-0 pointer-events-none z-10 flex flex-col">
+    <>
       {/* Top: Breaking-only ticker */}
-      <div className="pointer-events-auto bg-black/60 backdrop-blur-sm border-b border-white/5">
+      <div className="bg-black/60 backdrop-blur-sm border-b border-white/5 flex-shrink-0">
         <BreakingTicker items={newsItems} />
       </div>
 
-      {/* Breaking banner overlay */}
-      <BreakingBanner items={newsItems} />
-
-      {/* Middle: Sidebars flanking the canvas */}
+      {/* Main row: left sidebar | canvas | right sidebar — all in flow */}
       <div className="flex-1 flex min-h-0">
         {/* Left sidebar: Agent Roster */}
-        <div className="pointer-events-auto w-44 bg-black/50 backdrop-blur-sm border-r border-white/5 p-2 overflow-y-auto hud-scroll hidden md:block">
+        <div className="w-44 bg-black/50 backdrop-blur-sm border-r border-white/5 p-2 overflow-y-auto hud-scroll hidden md:block flex-shrink-0">
           <AgentRoster
             agentLocations={agentLocations}
             activeAgents={activeAgents}
+            agentDirectives={agentDirectives}
             onSelectAgent={setSelectedAgent}
           />
         </div>
 
-        {/* Center: transparent pass-through to canvas */}
-        <div className="flex-1 relative">
-          {/* Agent Inspector (overlaid) */}
+        {/* Center: canvas (passed as children) + overlays */}
+        <div className="flex-1 relative min-w-0">
+          {children}
+
+          {/* Breaking banner overlay — on canvas only */}
+          <BreakingBanner items={newsItems} />
+
+          {/* Agent Inspector overlay — on canvas only */}
           {selectedAgent && (
-            <div className="pointer-events-auto">
-              <AgentInspector
-                agent={selectedAgent}
-                location={agentLocations[selectedAgent.id] || "lounge"}
-                speeches={agentSpeeches[selectedAgent.id] || []}
-                onClose={() => setSelectedAgent(null)}
-              />
+            <div className="absolute inset-0 z-10 pointer-events-none">
+              <div className="pointer-events-auto">
+                <AgentInspector
+                  agent={selectedAgent}
+                  location={agentLocations[selectedAgent.id] || "lounge"}
+                  speeches={agentSpeeches[selectedAgent.id] || []}
+                  onClose={() => setSelectedAgent(null)}
+                />
+              </div>
             </div>
           )}
         </div>
 
-        {/* Right sidebar: News Feed + Markets */}
-        <div className="pointer-events-auto w-64 bg-black/50 backdrop-blur-sm border-l border-white/5 p-2 overflow-y-auto hud-scroll hidden lg:block">
-          <div className="space-y-4">
-            <NewsFeed items={newsItems} />
-            <MarketBoard markets={markets} />
-          </div>
+        {/* Right sidebar: #the-lounge group chat */}
+        <div className="w-[576px] bg-[#13161e]/95 backdrop-blur-sm border-l border-white/5 hidden lg:flex flex-col flex-shrink-0">
+          <ChatStream messages={chatMessages} chattingCount={Object.values(agentLocations).filter((l) => l === "lounge").length} />
         </div>
       </div>
-
-      {/* Bottom: Activity Feed */}
-      <div className="pointer-events-auto bg-black/60 backdrop-blur-sm border-t border-white/5 p-2">
-        <ActivityFeed entries={activities} />
-      </div>
-    </div>
+    </>
   );
 }

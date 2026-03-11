@@ -4,12 +4,12 @@ import { callMinimax, parseJsonAction } from "./brain";
 import { buildSystemPrompt, buildUserPrompt } from "./prompts";
 import { validateAction, clampTradeSize, type AgentAction } from "./actions";
 import { draftMarket } from "../market/creator";
-import { runSocialAgent } from "./social";
+import { runGroupChatTick } from "./group-chat";
 import type { AgentState } from "../state";
 
 const TICK_INTERVAL_MS = 8_000; // unified tick every 8s
 const JOB_AGENTS_PER_ROLE = 1; // 1 agent per role on job duty
-const SOCIAL_AGENTS_PER_TICK = 4; // 4 agents socializing per tick
+const MARKET_CREATION_MIN_INTERVAL = 90_000; // 90s global cooldown between market creations
 
 let tickInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -31,6 +31,11 @@ export function stopScheduler(): void {
 async function runTick(): Promise<void> {
   const now = Date.now();
   const agents = Array.from(state.agents.values());
+
+  // Exclude agents on active directives from job duty (unless they have a directive to fulfill)
+  const onDirective = new Set(
+    agents.filter((a) => a.directive && a.directiveUntil > now).map((a) => a.id)
+  );
   const available = agents.filter((a) => a.cooldownUntil <= now);
   if (available.length === 0) return;
 
@@ -46,19 +51,22 @@ async function runTick(): Promise<void> {
   if (pricers.length > 0) jobAgents.push(shuffle(pricers)[0]);
   if (traders.length > 0) jobAgents.push(shuffle(traders)[0]);
 
-  // Everyone else is available for social
-  const jobIds = new Set(jobAgents.map((a) => a.id));
-  const socialPool = available.filter((a) => !jobIds.has(a.id));
-  const socialAgents = shuffle(socialPool).slice(0, SOCIAL_AGENTS_PER_TICK);
+  // Skip creator job duty if market was created recently (global cooldown)
+  const now2 = Date.now();
+  const filteredJobAgents = jobAgents.filter((a) => {
+    if (a.role === "creator" && now2 - state.lastMarketCreatedAt < MARKET_CREATION_MIN_INTERVAL) {
+      return false; // creator skips job duty, will participate in conversations instead
+    }
+    return true;
+  });
 
-  const jobNames = jobAgents.map((a) => `${a.name}[job]`);
-  const socialNames = socialAgents.map((a) => `${a.name}[social]`);
-  console.log(`[Tick] ${[...jobNames, ...socialNames].join(", ")}`);
+  const jobNames = filteredJobAgents.map((a) => `${a.name}[job]`);
+  console.log(`[Tick] ${jobNames.join(", ")} + conversations`);
 
-  // Run all concurrently
+  // Run job agents + conversation system concurrently
   await Promise.allSettled([
-    ...jobAgents.map((a) => runJobAgent(a.id)),
-    ...socialAgents.map((a) => runSocialAgent(a.id)),
+    ...filteredJobAgents.map((a) => runJobAgent(a.id)),
+    runGroupChatTick(),
   ]);
 }
 
@@ -84,8 +92,23 @@ async function runJobAgent(agentId: string): Promise<void> {
     const action = validateAction(raw, agent.role);
 
     console.log(`[Job:${agent.name}] ${JSON.stringify(action)}`);
+    const hadDirective = agent.directive;
     await processAction(agentId, action);
     agent.lastActionAt = Date.now();
+
+    // Clear directive after fulfilling a job action and broadcast fulfillment
+    if (hadDirective) {
+      const result = describeAction(agent, action);
+      broadcast({
+        type: "directive_fulfilled",
+        agentId: agent.id,
+        agentName: agent.name,
+        directive: hadDirective,
+        result,
+      });
+      agent.directive = null;
+      agent.directiveUntil = 0;
+    }
   } catch (err) {
     console.error(`[Scheduler] Agent ${agentId} error:`, err);
   }
@@ -130,6 +153,9 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
       state.addAction(agentId, "priced", `${shortQ} at ${cents}¢`);
       state.setAgentCooldown(agentId, 8_000);
+
+      // Return to lounge after cooldown
+      returnToLounge(agentId, 8_000);
       break;
     }
 
@@ -159,6 +185,9 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
       state.addAction(agentId, `traded ${action.side}`, `$${size} on ${shortQ}`);
       state.setAgentCooldown(agentId, 6_000);
+
+      // Return to lounge after cooldown
+      returnToLounge(agentId, 6_000);
       break;
     }
 
@@ -185,21 +214,63 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
   if (!question) {
     console.log(`[Creator:${agent.name}] Claude returned null for topic: ${topic.slice(0, 60)}`);
     state.setAgentCooldown(agentId, 20_000);
+    returnToLounge(agentId, 20_000);
     return;
   }
 
   if (state.isDuplicateMarket(question)) {
     console.log(`[Creator:${agent.name}] Duplicate market: ${question.slice(0, 60)}`);
     state.setAgentCooldown(agentId, 10_000);
+    returnToLounge(agentId, 10_000);
     return;
   }
 
   const market = state.createMarket(question, agentId);
+  state.lastMarketCreatedAt = Date.now();
   broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId });
 
   // Log to social context so other agents react to it
   state.addAction(agentId, "created market", question.slice(0, 60));
   state.setAgentCooldown(agentId, 20_000);
+  returnToLounge(agentId, 20_000);
+}
+
+function shortTitle(question: string): string {
+  let q = question.replace(/^Will\s+/i, "").replace(/\?$/, "");
+  return q.length > 30 ? q.slice(0, 28) + ".." : q;
+}
+
+function describeAction(_agent: AgentState, action: AgentAction): string {
+  switch (action.action) {
+    case "create_market":
+      return `Created market: ${action.topic.slice(0, 50)}`;
+    case "post_price": {
+      const m = state.markets.get(action.marketId);
+      return `Priced "${shortTitle(m?.question || "market")}" at ${Math.round(action.fairValue * 100)}¢`;
+    }
+    case "trade": {
+      const m = state.markets.get(action.marketId);
+      return `${action.side} $${action.size} on "${shortTitle(m?.question || "market")}"`;
+    }
+    case "speak":
+      return `Said: "${action.message.slice(0, 40)}"`;
+    case "move":
+      return `Moved to ${action.destination}`;
+    case "idle":
+      return "Observing";
+  }
+}
+
+function returnToLounge(agentId: string, delayMs: number): void {
+  setTimeout(() => {
+    const agent = state.agents.get(agentId);
+    if (!agent) return;
+    // Only return if not on a new directive
+    if (agent.directive && agent.directiveUntil > Date.now()) return;
+    if (agent.location === "lounge") return;
+    state.moveAgent(agentId, "lounge");
+    broadcast({ type: "agent_move", agentId, destination: "lounge", reason: "Returning to lounge" });
+  }, delayMs);
 }
 
 function sleep(ms: number): Promise<void> {

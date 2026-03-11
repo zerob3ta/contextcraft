@@ -1,5 +1,6 @@
 import Phaser from "phaser";
-import { ALL_AGENTS, type Building, type Emotion } from "../config/agents";
+import { ALL_AGENTS, type Building, type RealBuilding, type Emotion } from "../config/agents";
+import type { AgentMood } from "../config/events";
 import { BUILDINGS, BUILDING_LIST, type BuildingConfig } from "../config/buildings";
 import { Agent } from "../entities/Agent";
 import { findPath, getPathSegments, getBuildingEntrance } from "../systems/Pathfinding";
@@ -10,6 +11,7 @@ export class TownScene extends Phaser.Scene {
   private buildingSlotOccupancy = new Map<string, Map<string, string>>();
   private marketDisplays: Phaser.GameObjects.Container[] = [];
   private newsAlertContainer?: Phaser.GameObjects.Container;
+  private activeBubbleAgents = new Map<string, { x: number; y: number; expireAt: number }>();
 
   constructor() {
     super({ key: "TownScene" });
@@ -31,21 +33,21 @@ export class TownScene extends Phaser.Scene {
 
     // Grass base
     gfx.fillStyle(0x2d5a27, 1);
-    gfx.fillRect(0, 0, 1280, 720);
+    gfx.fillRect(0, 0, 2000, 1200);
 
     // Subtle grass texture with darker patches
     gfx.fillStyle(0x245020, 0.4);
     for (let i = 0; i < 60; i++) {
-      const x = Math.random() * 1280;
-      const y = Math.random() * 720;
+      const x = Math.random() * 2000;
+      const y = Math.random() * 1200;
       gfx.fillRect(x, y, 8 + Math.random() * 16, 4 + Math.random() * 8);
     }
 
     // Lighter grass highlights
     gfx.fillStyle(0x3a7a33, 0.3);
     for (let i = 0; i < 40; i++) {
-      const x = Math.random() * 1280;
-      const y = Math.random() * 720;
+      const x = Math.random() * 2000;
+      const y = Math.random() * 1200;
       gfx.fillRect(x, y, 4 + Math.random() * 12, 4 + Math.random() * 6);
     }
 
@@ -92,12 +94,12 @@ export class TownScene extends Phaser.Scene {
 
     // Place trees in empty areas between buildings
     const treePositions = [
-      { x: 440, y: 100 }, { x: 470, y: 150 },
-      { x: 430, y: 500 }, { x: 470, y: 560 },
-      { x: 780, y: 130 }, { x: 800, y: 170 },
-      { x: 780, y: 500 }, { x: 810, y: 550 },
-      { x: 1060, y: 200 }, { x: 1080, y: 460 },
-      { x: 1050, y: 140 }, { x: 1070, y: 500 },
+      { x: 330, y: 100 }, { x: 350, y: 160 },
+      { x: 320, y: 580 }, { x: 350, y: 650 },
+      { x: 700, y: 120 }, { x: 720, y: 180 },
+      { x: 700, y: 590 }, { x: 730, y: 660 },
+      { x: 1020, y: 220 }, { x: 1040, y: 500 },
+      { x: 1010, y: 160 }, { x: 1030, y: 560 },
     ];
 
     for (const pos of treePositions) {
@@ -106,9 +108,9 @@ export class TownScene extends Phaser.Scene {
 
     // Bushes scattered around
     const bushPositions = [
-      { x: 230, y: 310 }, { x: 500, y: 320 },
-      { x: 750, y: 250 }, { x: 750, y: 420 },
-      { x: 430, y: 240 }, { x: 430, y: 420 },
+      { x: 100, y: 370 }, { x: 400, y: 370 },
+      { x: 680, y: 270 }, { x: 680, y: 470 },
+      { x: 330, y: 260 }, { x: 330, y: 480 },
     ];
 
     for (const pos of bushPositions) {
@@ -234,28 +236,59 @@ export class TownScene extends Phaser.Scene {
   // ── Agent Management ─────────────────────────────────────
 
   private spawnAgents(): void {
-    const lounge = BUILDINGS.lounge;
-
-    // Initialize slot occupancy for all buildings
+    // Initialize slot occupancy for all buildings + path locations
     for (const building of BUILDING_LIST) {
       this.buildingSlotOccupancy.set(building.id, new Map());
     }
+    for (const pathLoc of ["path_left", "path_center", "path_right"] as Building[]) {
+      this.buildingSlotOccupancy.set(pathLoc, new Map());
+    }
 
-    ALL_AGENTS.forEach((config, i) => {
-      // Spread agents across lounge slots and nearby area
-      const slotIdx = i % lounge.slots.length;
-      const slot = lounge.slots[slotIdx];
-      const offsetX = Math.floor(i / lounge.slots.length) * 20;
-      const offsetY = Math.floor(i / lounge.slots.length) * 15;
+    const roleBuildings: Record<string, RealBuilding> = {
+      creator: "newsroom",
+      pricer: "exchange",
+      trader: "pit",
+    };
+
+    // Track per-building spawn index for slot assignment
+    const spawnIdx: Record<string, number> = {};
+
+    ALL_AGENTS.forEach((config) => {
+      const building = roleBuildings[config.role] || "lounge";
+      const bConfig = BUILDINGS[building];
+      const idx = spawnIdx[building] || 0;
+      spawnIdx[building] = idx + 1;
+
+      const slotIdx = idx % bConfig.slots.length;
+      const slot = bConfig.slots[slotIdx];
+      const row = Math.floor(idx / bConfig.slots.length);
+      const offsetX = row * 18;
+      const offsetY = row * 12;
 
       const agent = new Agent(this, config, slot.x + offsetX, slot.y + offsetY);
       this.agents.set(config.id, agent);
-      this.agentLocations.set(config.id, "lounge");
+      this.agentLocations.set(config.id, building);
     });
   }
 
+  private isPathLocation(building: Building): boolean {
+    return building === "path_left" || building === "path_center" || building === "path_right";
+  }
+
   private assignSlot(agentId: string, building: Building): { x: number; y: number } {
-    const config = BUILDINGS[building];
+    // Path locations: agents stand near the intersection point with small offsets
+    if (this.isPathLocation(building)) {
+      const entrance = getBuildingEntrance(building);
+      const occupancy = this.buildingSlotOccupancy.get(building);
+      const idx = occupancy?.size || 0;
+      occupancy?.set(agentId, idx.toString());
+      return {
+        x: entrance.x + (idx % 2 === 0 ? -15 : 15),
+        y: entrance.y + (idx < 2 ? 0 : 15),
+      };
+    }
+
+    const config = BUILDINGS[building as RealBuilding];
     const occupancy = this.buildingSlotOccupancy.get(building)!;
 
     // Find first open slot
@@ -310,6 +343,12 @@ export class TownScene extends Phaser.Scene {
 
     agent.walkTo(fullPath, () => {
       this.agentLocations.set(agentId, destination);
+      // Set working state when arriving at a work building
+      if (destination !== "lounge" && !destination.startsWith("path_")) {
+        agent.setAgentState("working");
+      } else {
+        agent.setAgentState("idle");
+      }
     });
 
     this.agentLocations.set(agentId, destination);
@@ -492,6 +531,38 @@ export class TownScene extends Phaser.Scene {
     agent.showTradeEffect();
   }
 
+  setAgentDirective(agentId: string, directive: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.setDirective(directive);
+  }
+
+  showDirectiveFulfilled(agentId: string, result: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.setDirective(""); // clear directive label
+    agent.setAgentState("idle");
+    agent.showActionToast(result);
+  }
+
+  setAgentMood(agentId: string, mood: AgentMood): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.setMood(mood);
+  }
+
+  setAgentChatting(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.setAgentState("chatting");
+    // Auto-clear after 10s
+    this.time.delayedCall(10000, () => {
+      if (agent.getAgentState() === "chatting") {
+        agent.setAgentState("idle");
+      }
+    });
+  }
+
   // ── Idle behavior ────────────────────────────────────────
 
   getAgentIds(): string[] {
@@ -501,5 +572,9 @@ export class TownScene extends Phaser.Scene {
   getRandomBuilding(): Building {
     const buildings: Building[] = ["newsroom", "workshop", "exchange", "pit", "lounge"];
     return buildings[Math.floor(Math.random() * buildings.length)];
+  }
+
+  update(): void {
+    // Reserved for future per-frame updates
   }
 }

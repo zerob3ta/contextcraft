@@ -37,6 +37,19 @@ export default function GameCanvas() {
           gameEventBus.emit(event);
         });
 
+        // Listen for HUD-originated events (e.g. agent_directive) and forward directly to scene
+        const unsubBus = gameEventBus.on((event) => {
+          const scene = handle.getScene();
+          if (!scene) return;
+          if (event.type === "agent_directive") {
+            scene.setAgentDirective(event.agentId, event.directive);
+          } else if (event.type === "directive_fulfilled") {
+            scene.showDirectiveFulfilled(event.agentId, event.result);
+          }
+        });
+        // Store unsub for cleanup
+        (handle as unknown as { _busUnsub?: () => void })._busUnsub = unsubBus;
+
         // Try WS first — fall back to demo only if WS connection fully fails
         connectWs(handle);
       } catch (err) {
@@ -112,6 +125,7 @@ export default function GameCanvas() {
         wsRef.current = null;
       }
       if (handleRef.current) {
+        (handleRef.current as unknown as { _busUnsub?: () => void })._busUnsub?.();
         handleRef.current.destroy();
         handleRef.current = null;
       }
