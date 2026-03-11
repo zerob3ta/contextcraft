@@ -3,7 +3,7 @@ import { broadcast } from "../ws-bridge";
 import { callMinimax, parseJsonAction } from "./brain";
 import { buildSystemPrompt, buildUserPrompt } from "./prompts";
 import { validateAction, clampTradeSize, type AgentAction } from "./actions";
-import { draftMarket } from "../market/creator";
+import { draftMarket, type MarketDraft } from "../market/creator";
 import { runGroupChatTick, notifyBuildingEvent } from "./group-chat";
 import { isContextEnabled } from "../context-api/client";
 import { submitMarket, canCreateMarket } from "../context-api/markets";
@@ -274,14 +274,17 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
 
   const news = state.getRecentNews(5);
   const newsContext = news.map((n) => `- ${n.headline}: ${n.snippet}`).join("\n");
-  const question = await draftMarket(topic, newsContext);
+  const result = await draftMarket(topic, newsContext);
 
-  if (!question) {
+  if (!result) {
     console.log(`[Creator:${agent.name}] Claude returned null for topic: ${topic.slice(0, 60)}`);
     state.setAgentCooldown(agentId, 20_000);
     returnToLounge(agentId, 20_000);
     return;
   }
+
+  // Extract question string from result (structured MarketDraft or plain string)
+  const question = typeof result === "string" ? result : result.question;
 
   if (state.isDuplicateMarket(question)) {
     console.log(`[Creator:${agent.name}] Duplicate market: ${question.slice(0, 60)}`);
@@ -292,24 +295,30 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
 
   // Use Context API if available, otherwise local-only
   if (isContextEnabled() && canCreateMarket()) {
-    // Build structured draft for agent-submit
-    const endTime = new Date(Date.now() + 24 * 60 * 60_000);
+    // Build structured draft for agent-submit — use MarketDraft fields if available
+    const isStructured = typeof result !== "string";
+    const endTimeHours = isStructured ? result.endTimeHours : 24;
+    const endTime = new Date(Date.now() + endTimeHours * 60 * 60_000);
+
     const draft: AgentMarketDraft = {
       formattedQuestion: question,
-      shortQuestion: question.length > 200 ? question.slice(0, 197) + "..." : question,
+      shortQuestion: isStructured ? result.shortQuestion : (question.length > 200 ? question.slice(0, 197) + "..." : question),
       marketType: "OBJECTIVE",
-      evidenceMode: "web_enabled",
-      sources: inferSources(question, topic),
-      resolutionCriteria: `This market resolves YES if the event described in the question occurs before the end time. Otherwise it resolves NO. Resolution is determined by official sources and credible news reporting.`,
-      endTime: `${endTime.getFullYear()}-${String(endTime.getMonth() + 1).padStart(2, "0")}-${String(endTime.getDate()).padStart(2, "0")} 23:59:59`,
+      evidenceMode: isStructured ? result.evidenceMode : "web_enabled",
+      sources: isStructured
+        ? result.sources.map((s) => s.startsWith("@") ? `https://x.com/${s.slice(1)}` : s)
+        : inferSources(question, topic),
+      resolutionCriteria: isStructured
+        ? result.resolutionCriteria
+        : `This market resolves YES if the event described in the question occurs before the end time. Otherwise it resolves NO. Resolution is determined by official sources and credible news reporting.`,
+      endTime: `${endTime.getFullYear()}-${String(endTime.getMonth() + 1).padStart(2, "0")}-${String(endTime.getDate()).padStart(2, "0")} ${String(endTime.getHours()).padStart(2, "0")}:${String(endTime.getMinutes()).padStart(2, "0")}:00`,
       timezone: "America/New_York",
     };
 
     // Non-blocking submit — goes to background poller
     const submissionId = await submitMarket(agentId, draft, question);
     if (submissionId) {
-      console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 60)}`);
-      // Also create local market as pending (apiMarketId will be set when creation completes)
+      console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 60)} (${endTimeHours}h, ${draft.evidenceMode})`);
       const market = state.createMarket(question, agentId);
       state.lastMarketCreatedAt = Date.now();
       broadcast({

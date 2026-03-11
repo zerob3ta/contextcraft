@@ -28,6 +28,16 @@ export interface Market {
   apiMarketId: string | null; // real hex UUID from Context API
   isExternal: boolean; // true = discovered from testnet, false = created by our agents
   apiUrl: string | null;
+  // Oracle + quotes data (from Context Markets AI oracle)
+  oracleProb: number | null;        // oracle probability estimate (0-1)
+  oracleConfidence: string | null;   // "low" | "medium" | "high"
+  oracleSummary: string | null;      // short reasoning from oracle
+  oracleUpdatedAt: number | null;
+  bestBid: number | null;            // current best bid (cents)
+  bestAsk: number | null;            // current best ask (cents)
+  lastTradePrice: number | null;     // last trade price (cents)
+  oracleDivergence: number | null;   // oracle - market price (cents, signed)
+  priceHistory: { time: number; price: number }[];
 }
 
 // ─── Agent State ───
@@ -217,6 +227,15 @@ class ServerState {
       apiMarketId: null,
       isExternal: false,
       apiUrl: null,
+      oracleProb: null,
+      oracleConfidence: null,
+      oracleSummary: null,
+      oracleUpdatedAt: null,
+      bestBid: null,
+      bestAsk: null,
+      lastTradePrice: null,
+      oracleDivergence: null,
+      priceHistory: [],
     };
     this.markets.set(id, market);
     return market;
@@ -245,6 +264,15 @@ class ServerState {
       apiMarketId: info.apiMarketId,
       isExternal: true,
       apiUrl: null,
+      oracleProb: null,
+      oracleConfidence: null,
+      oracleSummary: null,
+      oracleUpdatedAt: null,
+      bestBid: null,
+      bestAsk: null,
+      lastTradePrice: null,
+      oracleDivergence: null,
+      priceHistory: [],
     };
     this.markets.set(id, market);
     this.apiMarketIdMap.set(info.apiMarketId, id);

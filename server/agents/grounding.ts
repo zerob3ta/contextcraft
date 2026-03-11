@@ -142,6 +142,24 @@ function getLocalContext(topic: string, marketQuestion?: string): string | null 
     }
   }
 
+  // Oracle context — divergence signals for pricers/traders
+  const markets = state.getActiveMarkets();
+  const divergentMarkets = markets.filter((m) =>
+    m.oracleDivergence !== null && Math.abs(m.oracleDivergence) >= 5 && m.oracleProb !== null
+  );
+  if (divergentMarkets.length > 0) {
+    parts.push("ORACLE DIVERGENCE SIGNALS:");
+    for (const m of divergentMarkets.slice(0, 5)) {
+      const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+      const oracleCents = Math.round(m.oracleProb! * 100);
+      const marketCents = m.fairValue !== null ? Math.round(m.fairValue * 100) : "?";
+      const dir = m.oracleDivergence! > 0 ? "UNDERPRICED" : "OVERPRICED";
+      let detail = `  ${dir}: "${shortQ}" — oracle: ${oracleCents}¢, market: ${marketCents}¢ (${m.oracleConfidence || "?"} confidence)`;
+      if (m.oracleSummary) detail += ` — ${m.oracleSummary.slice(0, 80)}`;
+      parts.push(detail);
+    }
+  }
+
   // Recent relevant news
   const news = state.getRecentNews(10);
   const relevantNews = news.filter((n) => {

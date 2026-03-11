@@ -12,10 +12,12 @@ import { notifyBuildingEvent } from "../agents/group-chat";
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
 const TOPIC_SEARCH_INTERVAL_MS = 120_000; // 2min — search based on chat topics
+const ORACLE_SYNC_INTERVAL_MS = 90_000; // 90s — oracle + quotes for active markets
 
 let balanceSyncTimer: ReturnType<typeof setInterval> | null = null;
 let marketSyncTimer: ReturnType<typeof setInterval> | null = null;
 let topicSearchTimer: ReturnType<typeof setInterval> | null = null;
+let oracleSyncTimer: ReturnType<typeof setInterval> | null = null;
 
 // Circuit breaker
 let consecutiveFailures = 0;
@@ -51,16 +53,19 @@ export function startSync(): void {
   setTimeout(() => syncBalances(), 5_000);
   setTimeout(() => syncMarkets(), 10_000);
   setTimeout(() => searchChatTopics(), 30_000);
+  setTimeout(() => syncOracleData(), 20_000);
 
   balanceSyncTimer = setInterval(syncBalances, BALANCE_SYNC_INTERVAL_MS);
   marketSyncTimer = setInterval(syncMarkets, MARKET_SYNC_INTERVAL_MS);
   topicSearchTimer = setInterval(searchChatTopics, TOPIC_SEARCH_INTERVAL_MS);
+  oracleSyncTimer = setInterval(syncOracleData, ORACLE_SYNC_INTERVAL_MS);
 }
 
 export function stopSync(): void {
   if (balanceSyncTimer) { clearInterval(balanceSyncTimer); balanceSyncTimer = null; }
   if (marketSyncTimer) { clearInterval(marketSyncTimer); marketSyncTimer = null; }
   if (topicSearchTimer) { clearInterval(topicSearchTimer); topicSearchTimer = null; }
+  if (oracleSyncTimer) { clearInterval(oracleSyncTimer); oracleSyncTimer = null; }
 }
 
 /**
@@ -109,8 +114,24 @@ async function syncMarkets(): Promise<void> {
   if (!client) return;
 
   try {
-    const result = await client.markets.list({ status: "active", limit: 50 });
-    const apiMarkets = result?.markets ?? [];
+    // Fetch active markets with multiple sort strategies for better coverage
+    const [defaultResult, trendingResult] = await Promise.allSettled([
+      client.markets.list({ status: "active", limit: 30 }),
+      client.markets.list({ status: "active", limit: 20, sortBy: "volume" }),
+    ]);
+
+    const defaultMarkets = defaultResult.status === "fulfilled" ? (defaultResult.value?.markets ?? []) : [];
+    const trendingMarkets = trendingResult.status === "fulfilled" ? (trendingResult.value?.markets ?? []) : [];
+
+    // Merge and deduplicate
+    const seen = new Set<string>();
+    const apiMarkets: typeof defaultMarkets = [];
+    for (const m of [...defaultMarkets, ...trendingMarkets]) {
+      if (!seen.has(m.id)) {
+        seen.add(m.id);
+        apiMarkets.push(m);
+      }
+    }
 
     let newCount = 0;
     for (const m of apiMarkets) {
@@ -165,6 +186,95 @@ async function syncMarkets(): Promise<void> {
   } catch (err) {
     console.error("[Context Sync] Market sync failed:", err);
     recordFailure();
+  }
+}
+
+/**
+ * Sync oracle data + quotes for tracked markets.
+ * Detects oracle-vs-market divergence and emits as trading signals.
+ */
+async function syncOracleData(): Promise<void> {
+  if (isCircuitBroken()) return;
+
+  const client = getReadClient();
+  if (!client) return;
+
+  const markets = state.getActiveMarkets().filter((m) => m.apiMarketId);
+  if (markets.length === 0) return;
+
+  // Process up to 5 markets per cycle to avoid rate limits
+  const batch = markets.slice(0, 5);
+
+  for (const market of batch) {
+    // Skip if recently updated (within 60s)
+    if (market.oracleUpdatedAt && Date.now() - market.oracleUpdatedAt < 60_000) continue;
+
+    try {
+      // Fetch oracle data — SDK returns { oracle: { confidenceLevel, summary: { decision, shortSummary, expandedSummary } } }
+      const oracleResult = await client.markets.oracle(market.apiMarketId!);
+      const oracleData = oracleResult?.oracle;
+      if (oracleData) {
+        // Extract probability from decision text (e.g. "YES 65%" → 0.65)
+        const decisionText = oracleData.summary?.decision || "";
+        const probMatch = decisionText.match(/(\d+)\s*%/);
+        const isYes = /^yes/i.test(decisionText);
+        let prob: number | null = null;
+        if (probMatch) {
+          const pct = parseInt(probMatch[1], 10);
+          prob = isYes ? pct / 100 : (100 - pct) / 100;
+        }
+
+        market.oracleProb = prob;
+        market.oracleConfidence = oracleData.confidenceLevel || null;
+        market.oracleSummary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 120) || null;
+        market.oracleUpdatedAt = Date.now();
+
+        // Compute divergence
+        if (prob !== null && market.fairValue !== null) {
+          const oracleCents = Math.round(prob * 100);
+          const marketCents = Math.round(market.fairValue * 100);
+          market.oracleDivergence = oracleCents - marketCents;
+
+          // Emit significant divergence as a newsroom signal
+          if (Math.abs(market.oracleDivergence) >= 10) {
+            const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+            const dir = market.oracleDivergence > 0 ? "underpriced" : "overpriced";
+            const headline = `Oracle signal: "${shortQ}" looks ${dir} by ${Math.abs(market.oracleDivergence)}¢ (oracle: ${oracleCents}¢, market: ${marketCents}¢)`;
+            state.addNews({ headline, snippet: "", source: "Oracle", category: "Markets" });
+            broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
+            notifyBuildingEvent("newsroom");
+            notifyBuildingEvent("exchange");
+          }
+        }
+      }
+
+      // Fetch quotes — SDK returns { yes: { bid, ask, last }, no: { bid, ask, last }, spread }
+      const quotes = await client.markets.quotes(market.apiMarketId!);
+      if (quotes) {
+        market.bestBid = quotes.yes?.bid ?? null;
+        market.bestAsk = quotes.yes?.ask ?? null;
+        market.lastTradePrice = quotes.yes?.last ?? null;
+      }
+
+      // Fetch price history — SDK returns { prices: [{ time, price }] }
+      try {
+        const history = await client.markets.priceHistory(market.apiMarketId!, { timeframe: "1h" });
+        if (history?.prices && Array.isArray(history.prices)) {
+          market.priceHistory = history.prices
+            .slice(-10)
+            .map((p: { time: number; price: number }) => ({
+              time: p.time || Date.now(),
+              price: p.price || 0,
+            }));
+        }
+      } catch {
+        // Price history is optional — don't fail the whole sync
+      }
+
+      recordSuccess();
+    } catch {
+      recordFailure();
+    }
   }
 }
 

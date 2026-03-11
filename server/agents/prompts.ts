@@ -98,9 +98,33 @@ export function buildUserPrompt(
       const priceStr = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}¢ (spread ${Math.round((m.spread || 0) * 100)}¢)` : "UNPRICED";
       const tradeCount = m.trades.length;
       const apiTag = m.apiMarketId ? " [LIVE]" : "";
-      // Show short title prominently, ID is just for action targeting
       const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
-      parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}`);
+
+      // Oracle data for pricers and traders — key trading signals
+      let oracleTag = "";
+      if ((agent.role === "pricer" || agent.role === "trader") && m.oracleProb !== null) {
+        const oracleCents = Math.round(m.oracleProb * 100);
+        oracleTag = ` | oracle: ${oracleCents}¢`;
+        if (m.oracleConfidence) oracleTag += ` (${m.oracleConfidence})`;
+        if (m.oracleDivergence !== null && Math.abs(m.oracleDivergence) >= 5) {
+          const dir = m.oracleDivergence > 0 ? "UNDERPRICED" : "OVERPRICED";
+          oracleTag += ` ⚡${dir} by ${Math.abs(m.oracleDivergence)}¢`;
+        }
+      }
+
+      // Price history trend
+      let trendTag = "";
+      if ((agent.role === "pricer" || agent.role === "trader") && m.priceHistory.length >= 3) {
+        const recent = m.priceHistory.slice(-3);
+        const first = recent[0].price;
+        const last = recent[recent.length - 1].price;
+        const delta = last - first;
+        if (Math.abs(delta) >= 2) {
+          trendTag = delta > 0 ? " ↑trending up" : " ↓trending down";
+        }
+      }
+
+      parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${oracleTag}${trendTag}`);
     }
   }
 
@@ -169,7 +193,8 @@ RULES:
 - Be aware of your INVENTORY (positions listed above). If you're long YES, tighten your YES ask to offload. If you're long NO, tighten your NO ask.
 - Widen your spread when uncertain, tighten when confident.
 - You CANNOT create markets or trade — only price them.
-- Price unpriced markets first, then reprice existing ones as conditions change.`,
+- Price unpriced markets first, then reprice existing ones as conditions change.
+- ORACLE SIGNALS: When you see "oracle: Xc" in the market listing, that's the AI oracle's probability estimate. If it says UNDERPRICED or OVERPRICED, the oracle disagrees with the market — consider adjusting your fair value toward the oracle.`,
 
   trader: `As a TRADER, your job is to take positions on prediction markets — buy when you see value, sell when the thesis changes.
 
@@ -181,7 +206,8 @@ RULES:
 - Check YOUR POSITIONS above — don't buy more of something you're already max long on. Consider selling instead.
 - side: "YES" or "NO" — which outcome you're trading. direction: "buy" or "sell".
 - Bigger size = higher conviction. But manage risk — don't put everything on one trade.
-- You CANNOT create or price markets — only trade.`,
+- You CANNOT create or price markets — only trade.
+- ORACLE SIGNALS: When you see "oracle: Xc" in the market listing, that's the AI oracle's probability estimate. UNDERPRICED = oracle thinks YES is more likely than market price → buy YES. OVERPRICED = oracle thinks YES is less likely → buy NO or sell YES. Oracle divergence ≥10¢ is a strong signal.`,
 };
 
 const ACTION_EXAMPLES: Record<string, string> = {
