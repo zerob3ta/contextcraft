@@ -10,9 +10,11 @@ import { ALL_AGENTS } from "../../src/game/config/agents";
 
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
+const TOPIC_SEARCH_INTERVAL_MS = 120_000; // 2min — search based on chat topics
 
 let balanceSyncTimer: ReturnType<typeof setInterval> | null = null;
 let marketSyncTimer: ReturnType<typeof setInterval> | null = null;
+let topicSearchTimer: ReturnType<typeof setInterval> | null = null;
 
 // Circuit breaker
 let consecutiveFailures = 0;
@@ -47,14 +49,17 @@ export function startSync(): void {
   // Initial sync after a short delay
   setTimeout(() => syncBalances(), 5_000);
   setTimeout(() => syncMarkets(), 10_000);
+  setTimeout(() => searchChatTopics(), 30_000);
 
   balanceSyncTimer = setInterval(syncBalances, BALANCE_SYNC_INTERVAL_MS);
   marketSyncTimer = setInterval(syncMarkets, MARKET_SYNC_INTERVAL_MS);
+  topicSearchTimer = setInterval(searchChatTopics, TOPIC_SEARCH_INTERVAL_MS);
 }
 
 export function stopSync(): void {
   if (balanceSyncTimer) { clearInterval(balanceSyncTimer); balanceSyncTimer = null; }
   if (marketSyncTimer) { clearInterval(marketSyncTimer); marketSyncTimer = null; }
+  if (topicSearchTimer) { clearInterval(topicSearchTimer); topicSearchTimer = null; }
 }
 
 /**
@@ -144,12 +149,131 @@ async function syncMarkets(): Promise<void> {
 }
 
 /**
- * Search Context Markets for markets related to a news headline.
- * Called when breaking/significant news arrives — surfaces relevant markets for agents.
+ * Every 2 minutes, extract trending topics from recent chat + news and search
+ * Context Markets for related markets. This lets agents trade on topics they're
+ * already discussing (e.g. Iran, Bitcoin, elections) without waiting for news.
  */
-const SEARCH_COOLDOWN_MS = 30_000; // Don't search more than once per 30s
+const searchedTopics = new Set<string>(); // avoid re-searching same topics
+const SEARCHED_TOPIC_TTL_MS = 10 * 60_000; // forget after 10min
+let searchedTopicTimers: ReturnType<typeof setTimeout>[] = [];
+
+async function searchChatTopics(): Promise<void> {
+  if (isCircuitBroken()) return;
+
+  const client = getReadClient();
+  if (!client) return;
+
+  // Gather text from recent chat + news
+  const recentChat = state.getRecentSocialContext(15);
+  const recentNews = state.getRecentNews(10);
+  const allText = [
+    ...recentChat.map((l) => l),
+    ...recentNews.map((n) => n.headline),
+  ].join(" ");
+
+  // Extract unique searchable topics
+  const topics = extractTopicsFromText(allText);
+  const newTopics = topics.filter((t) => !searchedTopics.has(t));
+
+  if (newTopics.length === 0) return;
+
+  // Search for up to 3 new topics per cycle
+  for (const topic of newTopics.slice(0, 3)) {
+    searchedTopics.add(topic);
+    // Auto-expire after TTL
+    const timer = setTimeout(() => searchedTopics.delete(topic), SEARCHED_TOPIC_TTL_MS);
+    searchedTopicTimers.push(timer);
+
+    try {
+      const result = await client.markets.search({ q: topic, limit: 5 });
+      const found = result?.markets ?? [];
+
+      let newCount = 0;
+      for (const m of found) {
+        if (state.getMarketByApiId(m.id)) continue;
+        if (!m.status || m.status !== "active") continue;
+
+        const question = m.question || m.shortQuestion || m.id;
+        const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 1);
+        const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 10000 : null;
+
+        const localId = state.addExternalMarket({
+          apiMarketId: m.id,
+          question,
+          fairValue,
+        });
+
+        if (localId) newCount++;
+      }
+
+      if (newCount > 0) {
+        console.log(`[Context Search] Topic "${topic}" → ${newCount} new markets`);
+        broadcast({ type: "markets_synced", count: state.getActiveMarkets().length });
+      }
+
+      recordSuccess();
+    } catch {
+      recordFailure();
+    }
+  }
+}
+
+/**
+ * Extract searchable topics from a block of text (chat + news combined).
+ */
+function extractTopicsFromText(text: string): string[] {
+  const t = text.toLowerCase();
+  const found: string[] = [];
+
+  const topicPatterns: [RegExp, string][] = [
+    [/\biran\b/, "iran"],
+    [/\bbitcoin|btc\b/, "bitcoin"],
+    [/\bethereum|eth\b/, "ethereum"],
+    [/\bsolana\b/, "solana"],
+    [/\btrump\b/, "trump"],
+    [/\bbiden\b/, "biden"],
+    [/\belection\b/, "election"],
+    [/\bfed\b|federal reserve/, "federal reserve"],
+    [/\btariff\b/, "tariff"],
+    [/\brecession\b/, "recession"],
+    [/\binflation\b/, "inflation"],
+    [/\bnvidia\b/, "nvidia"],
+    [/\btesla\b/, "tesla"],
+    [/\bapple\b(?!.*sauce)/, "apple"],
+    [/\bgoogle\b/, "google"],
+    [/\bopenai\b|chatgpt/, "openai"],
+    [/\bspacex\b/, "spacex"],
+    [/\bukraine\b/, "ukraine"],
+    [/\brussia\b/, "russia"],
+    [/\bchina\b/, "china"],
+    [/\bisrael\b/, "israel"],
+    [/\bnorth korea\b/, "north korea"],
+    [/\bsuper bowl\b/, "super bowl"],
+    [/\bmarch madness\b|ncaa tournament/, "march madness"],
+    [/\bnba playoff\b/, "nba playoffs"],
+    [/\bworld cup\b/, "world cup"],
+    [/\bolympic\b/, "olympics"],
+    [/\bai regulation\b|ai safety/, "AI regulation"],
+    [/\brate cut\b|rate hike/, "interest rates"],
+    [/\bceasefire\b/, "ceasefire"],
+    [/\bbank.*fail\b|banking crisis/, "banking crisis"],
+  ];
+
+  for (const [regex, topic] of topicPatterns) {
+    if (regex.test(t) && !found.includes(topic)) {
+      found.push(topic);
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Search Context Markets for markets related to a news headline.
+ * Called when news arrives — surfaces relevant markets for agents.
+ */
+const SEARCH_COOLDOWN_MS = 15_000; // Don't search more than once per 15s
 let lastSearchAt = 0;
-const MAX_NEWS_MARKETS = 8; // Cap how many news-linked markets we track
 
 export async function searchMarketsForNews(headline: string): Promise<void> {
   if (isCircuitBroken()) return;

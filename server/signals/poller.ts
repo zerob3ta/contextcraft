@@ -78,7 +78,7 @@ function emitHeadline(headline: string, source: string, category: string, severi
   notifyBuildingEvent("newsroom");
 
   // Search Context Markets for related markets (non-blocking)
-  if (isContextEnabled() && severity === "breaking") {
+  if (isContextEnabled()) {
     searchMarketsForNews(headline).catch(() => {});
   }
 
