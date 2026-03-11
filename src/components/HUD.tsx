@@ -906,11 +906,12 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             const market = currentMarkets.find((m) => m.id === event.marketId);
             const marketQ = event.question || market?.question || "a market";
             const shortQ = marketQ.length > 50 ? marketQ.slice(0, 47) + "..." : marketQ;
+            const cost = Math.round(event.size * event.price);
             addChatMessage({
               type: "activity",
               agentId: event.agentId,
               agentName: traderName,
-              message: `${traderName} bought ${event.size} ${event.side} at ${Math.round(event.price * 100)}¢ on "${shortQ}"`,
+              message: `${traderName} bought ${event.side} $${cost} on "${shortQ}"`,
               building: event.building || "pit",
               timestamp: Date.now(),
             });

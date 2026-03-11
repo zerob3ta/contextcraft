@@ -560,16 +560,16 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     parts.push("\nChat is quiet. Start a conversation about something interesting.");
   }
 
-  // Gossip-on-arrival: if agent just moved here, suggest they bring news from where they came
+  // Gossip-on-arrival: if agent just moved here, mention the vibe only
   const arrival = recentArrivals.get(agent.id);
   if (arrival && arrival.tick >= tickCount - 1) {
     const fromName = BUILDING_DISPLAY_NAMES[arrival.from] || arrival.from;
 
-    if (agent.location === "lounge" && (arrival.from === "exchange" || arrival.from === "pit")) {
-      // Returning to lounge from price buildings — summarize as vibes, not numbers
-      parts.push(`\nYou just came back from ${fromName}. You can mention the energy/mood there (busy, quiet, tense, wild) but do NOT repeat any specific prices, percentages, or spreads. Keep it casual.`);
+    if (isLounge) {
+      // Returning to lounge — vibes only, no specific content from other buildings
+      parts.push(`\nYou just came back from ${fromName}. You can mention the energy/mood there (busy, quiet, tense, wild) but do NOT repeat any specifics. Keep it casual.`);
     } else {
-      // Other buildings: share what you heard
+      // Arriving at work buildings — brief context from where they came
       const fromMsgs = chatLog
         .filter((m) => m.building === arrival.from)
         .slice(0, 3)
@@ -625,10 +625,13 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     const validMoods: AgentMood[] = ["bullish", "bearish", "uncertain", "confident", "scared", "manic", "neutral"];
     const mood = validMoods.includes(raw.mood as AgentMood) ? (raw.mood as AgentMood) : currentMood;
 
-    // Validate replyTo
+    // Validate replyTo — must be in the same building (no cross-room replies)
     let replyTo: string | null = null;
-    if (raw.replyTo && chatLog.some((m) => m.id === raw.replyTo)) {
-      replyTo = raw.replyTo;
+    if (raw.replyTo) {
+      const replyMsg = chatLog.find((m) => m.id === raw.replyTo);
+      if (replyMsg && replyMsg.building === agent.location) {
+        replyTo = raw.replyTo;
+      }
     }
 
     // Validate conviction
@@ -728,34 +731,11 @@ function isTooSimilar(newMessage: string, recentMessages: ChatMessage[]): boolea
 function buildAttentionWindow(agent: AgentState): ChatMessage[] {
   const window: ChatMessage[] = [];
   const seen = new Set<string>();
-  const isLounge = agent.location === "lounge";
 
-  // Prioritize messages from the same building (last 6)
+  // ONLY show messages from the agent's current building — no cross-room leakage
   const sameBuilding = chatLog.filter((m) => m.building === agent.location);
-  for (const msg of sameBuilding.slice(0, 6)) {
+  for (const msg of sameBuilding.slice(0, 9)) {
     if (!seen.has(msg.id)) {
-      window.push(msg);
-      seen.add(msg.id);
-    }
-  }
-
-  // Cross-building messages for context — but lounge only gets lounge + newsroom,
-  // NOT exchange/pit (which are all price talk and contaminate the lounge vibe)
-  const priceBuildings = new Set(["exchange", "pit"]);
-  for (const msg of chatLog.slice(0, 15)) {
-    if (!seen.has(msg.id) && msg.building !== agent.location) {
-      // Lounge agents skip messages from price-heavy buildings
-      if (isLounge && priceBuildings.has(msg.building)) continue;
-      window.push(msg);
-      seen.add(msg.id);
-      if (window.length >= 9) break;
-    }
-  }
-
-  // Any messages mentioning this agent (scan last 20)
-  const nameLower = agent.name.toLowerCase();
-  for (const msg of chatLog.slice(0, 20)) {
-    if (!seen.has(msg.id) && msg.message.toLowerCase().includes(nameLower)) {
       window.push(msg);
       seen.add(msg.id);
     }
