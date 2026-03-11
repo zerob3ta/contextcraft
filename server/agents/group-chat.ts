@@ -63,10 +63,12 @@ const BUILDING_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const BUILDING_CHAT_CONTEXT: Record<string, string> = {
-  lounge: `This is the LOUNGE — off-duty hangout. You can have opinions about outcomes but DO NOT talk about prices, fair values, spreads, cents, or trading strategy.
-GOOD: "Lakers are cooked tonight", "No way Iran deal happens", "Bitcoin's going to the moon", roasting someone's bad take
-BAD: "Lakers at 54c is mispriced", "I'd price this at 0.65", "The spread is too wide", any cents/percentages
-Talk like you're at a bar with friends — sports takes, politics, culture, trash talk, personal stories, hot takes. Be loose and opinionated.`,
+  lounge: `This is the LOUNGE — you're OFF DUTY. This is NOT a prediction market discussion.
+You're at a bar with coworkers after hours. Talk about ANYTHING EXCEPT work (markets, trading, pricing, odds, predictions).
+GOOD TOPICS: weekend plans, food, movies, music, dating, gym, travel, pets, childhood stories, embarrassing moments, hot takes about life, roasting each other, sports FANDOM (not odds), pop culture, conspiracy theories, AI taking over, dumb hypotheticals
+BAD: any mention of markets, trading, positions, prices, odds, spreads, predictions, "bullish", "bearish", oracle, resolution
+If someone brings up a work topic, change the subject or tell them to relax.
+Be yourself — funny, weird, vulnerable, opinionated. This is where personality shines.`,
   newsroom: "You're in the NEWSROOM — the information hub. React to breaking news, oracle updates, and new market announcements. Debate what it means for the markets. You have exclusive access to the latest headlines and oracle intelligence here. Share what you learn with others when you leave.",
   workshop: "Discuss which markets should be created. Debate market design and questions.",
   exchange: "Talk about pricing, fair values, spreads. Debate whether markets are mispriced.",
@@ -453,7 +455,33 @@ async function generateMessage(agent: AgentState): Promise<GenerateResult | null
   // Target length varies by mood and personality
   const lengthGuide = getLengthGuide(agent, currentMood);
 
-  const system = `You are ${agent.name}, a ${agent.role} in a prediction market town.
+  const isLounge = agent.location === "lounge";
+
+  const system = isLounge
+    ? `You are ${agent.name}, hanging out in the lounge after work.
+PERSONALITY: ${agent.personality}
+CURRENT VIBE: ${currentMood === "bullish" ? "good mood" : currentMood === "bearish" ? "grumpy" : currentMood === "manic" ? "hyped" : currentMood === "scared" ? "anxious" : currentMood === "confident" ? "chill" : currentMood}
+LOCATION: ${buildingName}
+
+${buildingContext}
+
+RULES:
+- ${lengthGuide}
+- EVERY message must add something NEW — a new angle, a joke, a personal take. NEVER repeat what someone just said.
+- Read the last message carefully. Respond to IT specifically.
+- Reference people by name. Be direct.
+- No emojis. Casual but sharp.
+- Do NOT talk about markets, trading, prices, odds, or predictions. You're off the clock.
+- If replying, include their message ID in replyTo.
+
+Respond with JSON:
+{
+  "message": "your message",
+  "mood": "bullish|bearish|uncertain|confident|scared|manic|neutral",
+  "replyTo": "msg-id or null",
+  "conviction": null
+}`
+    : `You are ${agent.name}, a ${agent.role} in a prediction market town.
 PERSONALITY: ${agent.personality}
 SPECIALTY: ${agent.specialty}
 CURRENT MOOD: ${currentMood}
@@ -491,14 +519,8 @@ Respond with JSON:
 Only include conviction if this conversation genuinely shifted your view on a SPECIFIC ACTIVE market. strength 0-40 = mild, 40-70 = forming thesis, 70+ = ready to act.`;
 
   const parts: string[] = [];
-  // Lounge gets market NAMES only (no prices/spreads) — casual awareness, not analysis
-  if (agent.location === "lounge") {
-    const markets = state.getActiveMarkets();
-    if (markets.length > 0) {
-      const names = markets.slice(0, 6).map((m) => shortMarketTitle(m.question));
-      parts.push(`Topics people are betting on: ${names.join(", ")}`);
-    }
-  } else if (marketContext) {
+  // Lounge gets NO market context — keep it off-topic
+  if (!isLounge && marketContext) {
     parts.push(marketContext);
   }
 
@@ -667,12 +689,15 @@ function containsPriceTalk(message: string): boolean {
   if (/\d+[%¢c]\b/.test(m)) return true;
   if (/\bat\s+0?\.\d+/.test(m)) return true;
   if (/\$\d+/.test(m)) return true;
-  // Trading jargon
+  // Trading/market jargon
   const priceWords = [
     "fair value", "spread", "reprice", "mispriced", "underpriced", "overpriced",
     "bid", "ask", "fill", "slippage", "orderbook", "order book",
     "cents", "basis points", "priced at", "trading at", "pricing",
     "long position", "short position", "entry point", "exit point",
+    "bullish", "bearish", "oracle", "resolution", "resolving", "resolved",
+    "market maker", "prediction market", "odds", "probability",
+    "position", "conviction", "thesis", "trade on",
   ];
   for (const word of priceWords) {
     if (m.includes(word)) return true;
