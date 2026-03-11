@@ -53,15 +53,29 @@ export function buildUserPrompt(
       for (const p of agent.positions.slice(0, 8)) {
         const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
         const label = m ? m.question.slice(0, 60) : "unknown market";
-        parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" (avg ${Math.round(p.avgPrice * 100)}¢)`);
+        // Flag positions on resolving/resolved markets
+        let resTag = "";
+        if (m && (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
+            m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed")) {
+          const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : "?";
+          const isWinning = p.outcome.toUpperCase() === outcomeStr;
+          resTag = isWinning ? " ✅WINNING" : " ❌LOSING→SELL NOW";
+        }
+        parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" (avg ${Math.round(p.avgPrice * 100)}¢)${resTag}`);
       }
     }
     if (agent.openOrders && agent.openOrders.length > 0) {
-      parts.push("YOUR OPEN ORDERS (will be cancelled on next price/trade):");
+      parts.push("YOUR OPEN ORDERS:");
       for (const o of agent.openOrders.slice(0, 6)) {
         const m = state.markets.get(o.marketId);
         const label = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 40) : o.marketId;
-        parts.push(`  - ${o.side} ${o.size}x at ${o.price}¢ on "${label}"`);
+        // Flag orders on resolving markets
+        let resTag = "";
+        if (m && (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
+            m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed")) {
+          resTag = " ⚠️CANCEL→market resolving";
+        }
+        parts.push(`  - ${o.side} ${o.size}x at ${o.price}¢ on "${label}"${resTag}`);
       }
     }
   }
@@ -86,50 +100,94 @@ export function buildUserPrompt(
   }
 
   if (markets.length > 0) {
-    // Prioritize our created markets (LIVE) over discovered external ones
-    const ours = markets.filter((m) => m.apiMarketId && !m.isExternal);
-    const external = markets.filter((m) => m.apiMarketId && m.isExternal);
-    const local = markets.filter((m) => !m.apiMarketId);
-    // Show our markets first, then a few external, cap total at 15
-    const ordered = [...ours, ...local, ...external].slice(0, 15);
+    // Split markets into active vs resolving/resolved
+    const isResolving = (m: Market) =>
+      m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
+      m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed";
 
-    parts.push("\nACTIVE MARKETS (use the ID in brackets for actions, but ALWAYS refer to markets by their title in speech):");
-    for (const m of ordered) {
-      const priceStr = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}¢ (spread ${Math.round((m.spread || 0) * 100)}¢)` : "UNPRICED";
-      const tradeCount = m.trades.length;
-      const apiTag = m.apiMarketId ? " [LIVE]" : "";
-      const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
+    const resolving = markets.filter(isResolving);
+    const active = markets.filter((m) => !isResolving(m));
 
-      // Resolution status — agents must know if market is resolving/resolved
-      let statusTag = "";
-      if (m.apiStatus === "resolved" || m.apiStatus === "closed") {
+    // ── RESOLVING/RESOLVED MARKETS (shown first, prominently) ──
+    if (resolving.length > 0) {
+      parts.push("\n🚨 RESOLVING/RESOLVED MARKETS (DO NOT TRADE — cancel orders, sell losing positions):");
+      for (const m of resolving) {
+        const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
         const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : "?";
-        statusTag = ` 🔒RESOLVED→${outcomeStr}`;
-      } else if (m.resolutionStatus === "pending" || m.apiStatus === "pending") {
-        const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : "?";
-        statusTag = ` ⚠️RESOLVING→${outcomeStr} (STOP TRADING)`;
+        const statusLabel = (m.apiStatus === "resolved" || m.apiStatus === "closed" || m.resolutionStatus === "resolved")
+          ? "RESOLVED" : "RESOLVING";
+        parts.push(`- ${shortTitle} [${m.id}] — ${statusLabel}→${outcomeStr}`);
       }
 
-      // Oracle qualitative context for pricers and traders
-      let oracleTag = "";
-      if ((agent.role === "pricer" || agent.role === "trader") && m.oracleSummary) {
-        oracleTag = ` | oracle: "${m.oracleSummary.slice(0, 60)}"`;
-        if (m.oracleConfidence) oracleTag += ` (${m.oracleConfidence})`;
-      }
+      // Check if this agent has exposure on resolving markets
+      if (agent.role === "pricer" || agent.role === "trader") {
+        const resolvingIds = new Set(resolving.map((m) => m.id));
+        const resolvingApiIds = new Set(resolving.filter((m) => m.apiMarketId).map((m) => m.apiMarketId));
 
-      // Price history trend
-      let trendTag = "";
-      if ((agent.role === "pricer" || agent.role === "trader") && m.priceHistory.length >= 3) {
-        const recent = m.priceHistory.slice(-3);
-        const first = recent[0].price;
-        const last = recent[recent.length - 1].price;
-        const delta = last - first;
-        if (Math.abs(delta) >= 2) {
-          trendTag = delta > 0 ? " ↑trending up" : " ↓trending down";
+        // Flag open orders on resolving markets
+        const dangerOrders = agent.openOrders?.filter(
+          (o) => resolvingIds.has(o.marketId) || resolvingApiIds.has(o.marketId)
+        ) || [];
+        if (dangerOrders.length > 0) {
+          parts.push(`⚠️ YOU HAVE ${dangerOrders.length} OPEN ORDER(S) ON RESOLVING MARKETS — use cancel_orders NOW.`);
+        }
+
+        // Flag positions on resolving markets
+        const dangerPositions = agent.positions?.filter(
+          (p) => resolvingIds.has(p.marketId) || resolvingApiIds.has(p.marketId)
+        ) || [];
+        if (dangerPositions.length > 0) {
+          parts.push(`⚠️ YOU HAVE POSITIONS ON RESOLVING MARKETS:`);
+          for (const p of dangerPositions) {
+            const m = resolving.find(
+              (rm) => rm.id === p.marketId || rm.apiMarketId === p.marketId
+            );
+            const outcomeStr = m?.outcome === 0 ? "YES" : m?.outcome === 1 ? "NO" : "?";
+            const isWinning = p.outcome.toUpperCase() === outcomeStr;
+            const label = m ? m.question.slice(0, 50) : "unknown";
+            const action = isWinning ? "HOLD (winning side)" : "SELL IMMEDIATELY (losing side)";
+            parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" → ${action}`);
+          }
         }
       }
+    }
 
-      parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${statusTag}${oracleTag}${trendTag}`);
+    // ── ACTIVE MARKETS ──
+    if (active.length > 0) {
+      // Prioritize our created markets (LIVE) over discovered external ones
+      const ours = active.filter((m) => m.apiMarketId && !m.isExternal);
+      const external = active.filter((m) => m.apiMarketId && m.isExternal);
+      const local = active.filter((m) => !m.apiMarketId);
+      const ordered = [...ours, ...local, ...external].slice(0, 15);
+
+      parts.push("\nACTIVE MARKETS (use the ID in brackets for actions):");
+      for (const m of ordered) {
+        const priceStr = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}¢ (spread ${Math.round((m.spread || 0) * 100)}¢)` : "UNPRICED";
+        const tradeCount = m.trades.length;
+        const apiTag = m.apiMarketId ? " [LIVE]" : "";
+        const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
+
+        // Oracle qualitative context for pricers and traders
+        let oracleTag = "";
+        if ((agent.role === "pricer" || agent.role === "trader") && m.oracleSummary) {
+          oracleTag = ` | oracle: "${m.oracleSummary.slice(0, 60)}"`;
+          if (m.oracleConfidence) oracleTag += ` (${m.oracleConfidence})`;
+        }
+
+        // Price history trend
+        let trendTag = "";
+        if ((agent.role === "pricer" || agent.role === "trader") && m.priceHistory.length >= 3) {
+          const recent = m.priceHistory.slice(-3);
+          const first = recent[0].price;
+          const last = recent[recent.length - 1].price;
+          const delta = last - first;
+          if (Math.abs(delta) >= 2) {
+            trendTag = delta > 0 ? " ↑trending up" : " ↓trending down";
+          }
+        }
+
+        parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${oracleTag}${trendTag}`);
+      }
     }
   }
 
@@ -200,7 +258,10 @@ RULES:
 - You CANNOT create markets or trade — only price them.
 - Price unpriced markets first, then reprice existing ones as conditions change.
 - ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as one input among many — it can be wrong. Form your OWN view based on news and market activity.
-- RESOLUTION: If a market says RESOLVING or RESOLVED, IMMEDIATELY cancel your orders on it. Do NOT place new orders on resolving/resolved markets.`,
+- RESOLUTION: If a market is in the RESOLVING/RESOLVED section, you MUST act immediately:
+  1. Cancel ALL your orders on that market using cancel_orders
+  2. Do NOT place new orders on it
+  This is your HIGHEST PRIORITY — resolving markets take precedence over everything else.`,
 
   trader: `As a TRADER, your job is to take positions on prediction markets — buy when you see value, sell when the thesis changes.
 
@@ -214,7 +275,11 @@ RULES:
 - Bigger size = higher conviction. But manage risk — don't put everything on one trade.
 - You CANNOT create or price markets — only trade.
 - ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as context but form your OWN view. The oracle can be wrong.
-- RESOLUTION: If a market says RESOLVING or RESOLVED, do NOT trade it. Cancel any open orders. Close positions if possible.`,
+- RESOLUTION: If a market is in the RESOLVING/RESOLVED section, you MUST act immediately:
+  1. Cancel ALL your orders on that market using cancel_orders
+  2. SELL any positions marked ❌LOSING using a sell trade — these will be worthless
+  3. Do NOT place new orders or buy more
+  This is your HIGHEST PRIORITY — resolving markets take precedence over everything else.`,
 };
 
 const ACTION_EXAMPLES: Record<string, string> = {

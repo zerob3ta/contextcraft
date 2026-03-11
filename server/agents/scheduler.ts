@@ -10,7 +10,7 @@ import { submitMarket, canCreateMarket } from "../context-api/markets";
 import { placePricingOrders, placeTrade, cancelOrders } from "../context-api/trading";
 import { getJobGrounding } from "./grounding";
 import type { AgentMarketDraft } from "../context-api/types";
-import type { AgentState } from "../state";
+import type { AgentState, Market } from "../state";
 
 const TICK_INTERVAL_MS = 8_000; // unified tick every 8s
 const JOB_AGENTS_PER_ROLE = 1; // 1 agent per role on job duty
@@ -36,6 +36,9 @@ export function stopScheduler(): void {
 async function runTick(): Promise<void> {
   const now = Date.now();
   const agents = Array.from(state.agents.values());
+
+  // Pre-tick: force cancel orders for agents with open orders on resolving markets
+  forceResolveCleanup();
 
   // Exclude agents on active directives from job duty (unless they have a directive to fulfill)
   const onDirective = new Set(
@@ -458,6 +461,56 @@ function describeAction(_agent: AgentState, action: AgentAction): string {
       return `Moved to ${action.destination}`;
     case "idle":
       return "Observing";
+  }
+}
+
+/**
+ * Pre-tick cleanup: for every agent with open orders on resolving/resolved markets,
+ * immediately cancel those orders without waiting for the LLM to decide.
+ */
+function forceResolveCleanup(): void {
+  const resolvingMarkets = new Map<string, Market>();
+  for (const m of state.getActiveMarkets()) {
+    if (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
+        m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed") {
+      resolvingMarkets.set(m.id, m);
+      if (m.apiMarketId) resolvingMarkets.set(m.apiMarketId, m);
+    }
+  }
+  if (resolvingMarkets.size === 0) return;
+
+  for (const agent of state.agents.values()) {
+    // Cancel open orders on resolving markets
+    if (agent.openOrders) {
+      for (const order of agent.openOrders) {
+        if (resolvingMarkets.has(order.marketId)) {
+          const m = resolvingMarkets.get(order.marketId)!;
+          if (isContextEnabled() && m.apiMarketId) {
+            console.log(`[Scheduler:ForceCleanup] Canceling ${agent.name}'s orders on resolving ${m.id}`);
+            cancelOrders(agent.id, m.id).catch(() => {});
+          }
+        }
+      }
+    }
+
+    // Set directive to sell losing positions on resolving markets
+    if (agent.positions && (agent.role === "trader" || agent.role === "pricer")) {
+      if (agent.directive && agent.directiveUntil > Date.now()) continue; // don't override existing directive
+      for (const pos of agent.positions) {
+        const m = resolvingMarkets.get(pos.marketId);
+        if (!m || pos.size <= 0) continue;
+        const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : null;
+        if (!outcomeStr) continue;
+        const isLosing = pos.outcome.toUpperCase() !== outcomeStr;
+        if (isLosing) {
+          const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 40);
+          agent.directive = `SELL your losing ${pos.outcome.toUpperCase()} position on "${shortQ}" [${m.id}] — market resolving ${outcomeStr}`;
+          agent.directiveUntil = Date.now() + 30_000;
+          console.log(`[Scheduler:ForceCleanup] ${agent.name} DIRECTIVE: sell losing position on ${m.id}`);
+          break; // one directive at a time
+        }
+      }
+    }
   }
 }
 
