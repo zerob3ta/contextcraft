@@ -63,13 +63,10 @@ const BUILDING_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const BUILDING_CHAT_CONTEXT: Record<string, string> = {
-  lounge: `This is the LOUNGE — the off-duty hangout. NO shop talk here. Talk about:
-- Sports arguments, hot takes, trash talk
-- Politics, culture, random opinions
-- Personal stories, jokes, roasting each other
-- Tangential takes loosely inspired by the news
-- Life outside markets — what you'd do with your winnings, weekend plans
-Keep it fun, loose, and human. Argue about dumb stuff. Be opinionated.`,
+  lounge: `This is the LOUNGE — off-duty hangout. You can have opinions about outcomes but DO NOT talk about prices, fair values, spreads, cents, or trading strategy.
+GOOD: "Lakers are cooked tonight", "No way Iran deal happens", "Bitcoin's going to the moon", roasting someone's bad take
+BAD: "Lakers at 54c is mispriced", "I'd price this at 0.65", "The spread is too wide", any cents/percentages
+Talk like you're at a bar with friends — sports takes, politics, culture, trash talk, personal stories, hot takes. Be loose and opinionated.`,
   newsroom: "React to breaking news. Debate what it means. You have exclusive access to the latest headlines here.",
   workshop: "Discuss which markets should be created. Debate market design and questions.",
   exchange: "Talk about pricing, fair values, spreads. Debate whether markets are mispriced.",
@@ -494,7 +491,16 @@ Respond with JSON:
 Only include conviction if this conversation genuinely shifted your view on a SPECIFIC ACTIVE market. strength 0-40 = mild, 40-70 = forming thesis, 70+ = ready to act.`;
 
   const parts: string[] = [];
-  if (marketContext) parts.push(marketContext);
+  // Lounge gets market NAMES only (no prices/spreads) — casual awareness, not analysis
+  if (agent.location === "lounge") {
+    const markets = state.getActiveMarkets();
+    if (markets.length > 0) {
+      const names = markets.slice(0, 6).map((m) => shortMarketTitle(m.question));
+      parts.push(`Topics people are betting on: ${names.join(", ")}`);
+    }
+  } else if (marketContext) {
+    parts.push(marketContext);
+  }
 
   // News is ONLY available in the newsroom — other buildings get nothing
   if (agent.location === "newsroom") {
