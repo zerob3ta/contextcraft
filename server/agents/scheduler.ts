@@ -5,11 +5,15 @@ import { buildSystemPrompt, buildUserPrompt } from "./prompts";
 import { validateAction, clampTradeSize, type AgentAction } from "./actions";
 import { draftMarket } from "../market/creator";
 import { runGroupChatTick, notifyBuildingEvent } from "./group-chat";
+import { isContextEnabled } from "../context-api/client";
+import { submitMarket, canCreateMarket } from "../context-api/markets";
+import { placePricingOrders, placeTrade } from "../context-api/trading";
+import type { AgentMarketDraft } from "../context-api/types";
 import type { AgentState } from "../state";
 
 const TICK_INTERVAL_MS = 8_000; // unified tick every 8s
 const JOB_AGENTS_PER_ROLE = 1; // 1 agent per role on job duty
-const MARKET_CREATION_MIN_INTERVAL = 90_000; // 90s global cooldown between market creations
+const MARKET_CREATION_MIN_INTERVAL = 600_000; // 10min global cooldown between market creations
 
 let tickInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -51,11 +55,16 @@ async function runTick(): Promise<void> {
   if (pricers.length > 0) jobAgents.push(shuffle(pricers)[0]);
   if (traders.length > 0) jobAgents.push(shuffle(traders)[0]);
 
-  // Skip creator job duty if market was created recently (global cooldown)
+  // Skip creator job duty if market was created recently (global cooldown) or daily limit reached
   const now2 = Date.now();
   const filteredJobAgents = jobAgents.filter((a) => {
-    if (a.role === "creator" && now2 - state.lastMarketCreatedAt < MARKET_CREATION_MIN_INTERVAL) {
-      return false; // creator skips job duty, will participate in conversations instead
+    if (a.role === "creator") {
+      if (now2 - state.lastMarketCreatedAt < MARKET_CREATION_MIN_INTERVAL) {
+        return false; // cooldown
+      }
+      if (isContextEnabled() && !canCreateMarket()) {
+        return false; // daily API limit reached
+      }
     }
     return true;
   });
@@ -146,10 +155,24 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       state.moveAgent(agentId, "exchange");
       broadcast({ type: "agent_move", agentId, destination: "exchange", reason: "Pricing" });
 
-      state.updatePrice(action.marketId, action.fairValue, action.spread);
-      broadcast({ type: "price_update", marketId: action.marketId, fairValue: action.fairValue, spread: action.spread, building: "exchange" });
-      notifyBuildingEvent("exchange");
-      notifyBuildingEvent("pit"); // traders should react to price changes
+      // Use real API if available, otherwise local state
+      if (isContextEnabled() && market.apiMarketId) {
+        const fairCents = Math.round(action.fairValue * 100);
+        const spreadCents = Math.round(action.spread * 100);
+        const success = await placePricingOrders(agentId, action.marketId, fairCents, spreadCents);
+        if (!success) {
+          // Fall back to local pricing
+          state.updatePrice(action.marketId, action.fairValue, action.spread);
+          broadcast({ type: "price_update", marketId: action.marketId, fairValue: action.fairValue, spread: action.spread, building: "exchange" });
+          notifyBuildingEvent("exchange");
+          notifyBuildingEvent("pit");
+        }
+      } else {
+        state.updatePrice(action.marketId, action.fairValue, action.spread);
+        broadcast({ type: "price_update", marketId: action.marketId, fairValue: action.fairValue, spread: action.spread, building: "exchange" });
+        notifyBuildingEvent("exchange");
+        notifyBuildingEvent("pit");
+      }
 
       // Log to social context so other agents can react
       const cents = Math.round(action.fairValue * 100);
@@ -167,31 +190,52 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       if (!market || market.fairValue === null) break;
 
       const size = clampTradeSize(agentId, action.size);
-      const price = action.side === "YES"
-        ? market.fairValue + (market.spread || 0.04) / 2
-        : 1 - market.fairValue + (market.spread || 0.04) / 2;
 
       state.moveAgent(agentId, "pit");
       broadcast({ type: "agent_move", agentId, destination: "pit", reason: "Trading" });
 
-      state.addTrade(action.marketId, agentId, action.side, size, price);
-      broadcast({
-        type: "trade_executed",
-        agentId,
-        marketId: action.marketId,
-        side: action.side,
-        size,
-        price: Math.round(price * 100) / 100,
-        building: "pit",
-      });
-      notifyBuildingEvent("pit");
+      // Use real API if available, otherwise local state
+      if (isContextEnabled() && market.apiMarketId) {
+        const success = await placeTrade(agentId, action.marketId, action.side, size);
+        if (!success) {
+          // Fall back to local trading
+          const price = action.side === "YES"
+            ? market.fairValue + (market.spread || 0.04) / 2
+            : 1 - market.fairValue + (market.spread || 0.04) / 2;
+          state.addTrade(action.marketId, agentId, action.side, size, price);
+          broadcast({
+            type: "trade_executed",
+            agentId,
+            marketId: action.marketId,
+            side: action.side,
+            size,
+            price: Math.round(price * 100) / 100,
+            building: "pit",
+          });
+          notifyBuildingEvent("pit");
+          const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
+          state.addAction(agentId, `traded ${action.side}`, `$${size} on ${shortQ}`);
+        }
+      } else {
+        const price = action.side === "YES"
+          ? market.fairValue + (market.spread || 0.04) / 2
+          : 1 - market.fairValue + (market.spread || 0.04) / 2;
+        state.addTrade(action.marketId, agentId, action.side, size, price);
+        broadcast({
+          type: "trade_executed",
+          agentId,
+          marketId: action.marketId,
+          side: action.side,
+          size,
+          price: Math.round(price * 100) / 100,
+          building: "pit",
+        });
+        notifyBuildingEvent("pit");
+        const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
+        state.addAction(agentId, `traded ${action.side}`, `$${size} on ${shortQ}`);
+      }
 
-      // Log to social context
-      const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
-      state.addAction(agentId, `traded ${action.side}`, `$${size} on ${shortQ}`);
       state.setAgentCooldown(agentId, 6_000);
-
-      // Return to lounge after cooldown
       returnToLounge(agentId, 6_000);
       break;
     }
@@ -230,16 +274,97 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
     return;
   }
 
-  const market = state.createMarket(question, agentId);
-  state.lastMarketCreatedAt = Date.now();
-  broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId, building: "workshop" });
-  notifyBuildingEvent("workshop");
-  notifyBuildingEvent("exchange"); // pricers should react
+  // Use Context API if available, otherwise local-only
+  if (isContextEnabled() && canCreateMarket()) {
+    // Build structured draft for agent-submit
+    const endTime = new Date(Date.now() + 24 * 60 * 60_000);
+    const draft: AgentMarketDraft = {
+      formattedQuestion: question,
+      shortQuestion: question.length > 200 ? question.slice(0, 197) + "..." : question,
+      marketType: "OBJECTIVE",
+      evidenceMode: "web_enabled",
+      sources: inferSources(question, topic),
+      resolutionCriteria: `This market resolves YES if the event described in the question occurs before the end time. Otherwise it resolves NO. Resolution is determined by official sources and credible news reporting.`,
+      endTime: `${endTime.getFullYear()}-${String(endTime.getMonth() + 1).padStart(2, "0")}-${String(endTime.getDate()).padStart(2, "0")} 23:59:59`,
+      timezone: "America/New_York",
+    };
 
-  // Log to social context so other agents react to it
-  state.addAction(agentId, "created market", question.slice(0, 60));
+    // Non-blocking submit — goes to background poller
+    const submissionId = await submitMarket(agentId, draft, question);
+    if (submissionId) {
+      console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 60)}`);
+      // Also create local market as pending (apiMarketId will be set when creation completes)
+      const market = state.createMarket(question, agentId);
+      state.lastMarketCreatedAt = Date.now();
+      broadcast({
+        type: "market_spawning",
+        marketId: market.id,
+        question: market.question,
+        creator: agentId,
+        building: "workshop",
+      });
+      notifyBuildingEvent("workshop");
+      notifyBuildingEvent("exchange");
+      state.addAction(agentId, "submitted market", question.slice(0, 60));
+    } else {
+      console.log(`[Creator:${agent.name}] Context API submit failed, falling back to local`);
+      const market = state.createMarket(question, agentId);
+      state.lastMarketCreatedAt = Date.now();
+      broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId, building: "workshop" });
+      notifyBuildingEvent("workshop");
+      notifyBuildingEvent("exchange");
+      state.addAction(agentId, "created market", question.slice(0, 60));
+    }
+  } else {
+    // Local-only creation
+    const market = state.createMarket(question, agentId);
+    state.lastMarketCreatedAt = Date.now();
+    broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId, building: "workshop" });
+    notifyBuildingEvent("workshop");
+    notifyBuildingEvent("exchange");
+    state.addAction(agentId, "created market", question.slice(0, 60));
+  }
+
   state.setAgentCooldown(agentId, 20_000);
   returnToLounge(agentId, 20_000);
+}
+
+/**
+ * Infer resolution sources from the question topic.
+ * Context API expects X account URLs (https://x.com/handle) or web URLs.
+ */
+function inferSources(question: string, topic: string): string[] {
+  const q = (question + " " + topic).toLowerCase();
+  const sources: string[] = [];
+
+  // Sports — use well-known verified X accounts
+  if (q.match(/nba|nfl|nhl|ncaa|laker|celtics|cavalier|knick|spread|game.*tonight|win.*tonight|beat|cover/)) {
+    sources.push("https://x.com/espn");
+    sources.push("https://x.com/sportscenter");
+  }
+  // Crypto
+  if (q.match(/btc|eth|bitcoin|crypto|token|solana|defi/)) {
+    sources.push("https://x.com/coindesk");
+    sources.push("https://x.com/coingecko");
+  }
+  // Politics
+  if (q.match(/trump|congress|president|fed|election|senate|house|vote/)) {
+    sources.push("https://x.com/ap");
+    sources.push("https://x.com/reuters");
+  }
+  // Tech
+  if (q.match(/apple|google|openai|ai|nvidia|tesla|spacex|tech/)) {
+    sources.push("https://x.com/reuters");
+    sources.push("https://x.com/techcrunch");
+  }
+
+  // Always include at least one general source
+  if (sources.length === 0) {
+    sources.push("https://x.com/ap");
+    sources.push("https://x.com/reuters");
+  }
+
+  return sources.slice(0, 5);
 }
 
 function shortTitle(question: string): string {

@@ -24,6 +24,8 @@ export type GameEvent =
       question: string;
       creator: string;
       building?: string;
+      apiMarketId?: string;
+      url?: string;
     }
   | {
       type: "price_update";
@@ -92,6 +94,25 @@ export type GameEvent =
       directive: string;
       result: string;
       building?: string;
+    }
+  // Context Markets integration events
+  | {
+      type: "market_rejected";
+      agentId: string;
+      question: string;
+      reason: string;
+      building?: string;
+    }
+  | {
+      type: "market_failed";
+      agentId: string;
+      question: string;
+      reason: string;
+      building?: string;
+    }
+  | {
+      type: "markets_synced";
+      count: number;
     };
 
 /** Pre-scripted demo timeline — runs on load so the town is alive immediately */

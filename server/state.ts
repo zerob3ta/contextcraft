@@ -24,9 +24,28 @@ export interface Market {
   trackingQuery: string | null;
   createdAt: number;
   trades: { agentId: string; side: "YES" | "NO"; size: number; price: number; ts: number }[];
+  // Context Markets API integration
+  apiMarketId: string | null; // real hex UUID from Context API
+  isExternal: boolean; // true = discovered from testnet, false = created by our agents
+  apiUrl: string | null;
 }
 
 // ─── Agent State ───
+
+export interface AgentOpenOrder {
+  nonce: string;
+  side: "buy" | "sell";
+  price: number;
+  size: number;
+  marketId: string;
+}
+
+export interface AgentPosition {
+  marketId: string;
+  outcome: string;
+  size: number;
+  avgPrice: number;
+}
 
 export interface AgentState {
   id: string;
@@ -40,6 +59,11 @@ export interface AgentState {
   cooldownUntil: number;
   directive: string | null;       // current action item from conversation
   directiveUntil: number;         // when directive expires
+  // Context Markets wallet
+  walletAddress?: string;
+  usdcBalance?: number;
+  positions?: AgentPosition[];
+  openOrders?: AgentOpenOrder[];
 }
 
 // ─── Global State ───
@@ -58,6 +82,12 @@ class ServerState {
   // Conversation insights (legacy, used by job prompts)
   conversationInsights: Map<string, { insight: string; ts: number }[]> = new Map();
   lastMarketCreatedAt = 0; // global cooldown for market creation
+
+  // Rejection feedback for creators (LLM learning)
+  recentRejections: { agentId: string; question: string; reason: string; ts: number }[] = [];
+
+  // Reverse lookup: apiMarketId → local market id
+  private apiMarketIdMap: Map<string, string> = new Map();
 
   addSpeech(agentId: string, message: string): void {
     this.recentSpeeches.unshift({ agentId, message, ts: Date.now() });
@@ -165,7 +195,7 @@ class ServerState {
   // ── Markets ──
 
   createMarket(question: string, creator: string): Market {
-    const id = `market-${this.nextMarketId++}`;
+    const id = `M${this.nextMarketId++}`;
     const market: Market = {
       id,
       question,
@@ -175,9 +205,63 @@ class ServerState {
       trackingQuery: null,
       createdAt: Date.now(),
       trades: [],
+      apiMarketId: null,
+      isExternal: false,
+      apiUrl: null,
     };
     this.markets.set(id, market);
     return market;
+  }
+
+  createMarketWithApiId(question: string, creator: string, apiMarketId: string): Market {
+    const market = this.createMarket(question, creator);
+    market.apiMarketId = apiMarketId;
+    this.apiMarketIdMap.set(apiMarketId, market.id);
+    return market;
+  }
+
+  addExternalMarket(info: { apiMarketId: string; question: string; fairValue: number | null }): string | null {
+    if (this.apiMarketIdMap.has(info.apiMarketId)) return null;
+
+    const id = `M${this.nextMarketId++}`;
+    const market: Market = {
+      id,
+      question: info.question,
+      creator: "external",
+      fairValue: info.fairValue,
+      spread: null,
+      trackingQuery: null,
+      createdAt: Date.now(),
+      trades: [],
+      apiMarketId: info.apiMarketId,
+      isExternal: true,
+      apiUrl: null,
+    };
+    this.markets.set(id, market);
+    this.apiMarketIdMap.set(info.apiMarketId, id);
+    return id;
+  }
+
+  getMarketByApiId(apiMarketId: string): Market | undefined {
+    const localId = this.apiMarketIdMap.get(apiMarketId);
+    return localId ? this.markets.get(localId) : undefined;
+  }
+
+  /** Get local market ID for a given API market ID */
+  getLocalMarketId(apiMarketId: string): string | undefined {
+    return this.apiMarketIdMap.get(apiMarketId);
+  }
+
+  addRejection(agentId: string, question: string, reason: string): void {
+    this.recentRejections.unshift({ agentId, question, reason, ts: Date.now() });
+    if (this.recentRejections.length > 10) this.recentRejections.length = 10;
+  }
+
+  getRecentRejections(agentId: string, limit = 3): { question: string; reason: string }[] {
+    return this.recentRejections
+      .filter((r) => r.agentId === agentId && Date.now() - r.ts < 30 * 60_000) // last 30 min
+      .slice(0, limit)
+      .map(({ question, reason }) => ({ question, reason }));
   }
 
   getActiveMarkets(): Market[] {
@@ -241,12 +325,26 @@ class ServerState {
   isDuplicateMarket(question: string): boolean {
     const norm = question.toLowerCase().replace(/[^a-z0-9\s]/g, "");
     const words = new Set(norm.split(/\s+/));
+
+    // Extract team names for sports dedup (catches "Rockets beat Nuggets" vs "Rockets cover +6.5 vs Nuggets")
+    const teamPattern = /(?:rockets|nuggets|lakers|celtics|cavaliers|cavs|magic|knicks|jazz|warriors|clippers|wolves|timberwolves|raptors|pelicans|hawks|heat|bucks|76ers|sixers|nets|pacers|pistons|spurs|suns|kings|grizzlies|thunder|blazers|hornets|bulls|mavericks|mavs|rangers|capitals|flyers|bruins|panthers|penguins|lightning|maple leafs|oilers|flames|canadiens|senators|devils|islanders|sabres|red wings|blue jackets|wild|kraken|predators|avalanche|stars|blackhawks|ducks|sharks|coyotes|jets|hurricanes)/g;
+    const teamsA = new Set(norm.match(teamPattern) || []);
+
     for (const m of this.markets.values()) {
       const mNorm = m.question.toLowerCase().replace(/[^a-z0-9\s]/g, "");
       const mWords = new Set(mNorm.split(/\s+/));
+
+      // Word overlap check (original)
       const overlap = [...words].filter((w) => mWords.has(w)).length;
       const similarity = overlap / Math.max(words.size, mWords.size);
       if (similarity > 0.7) return true;
+
+      // Team-based dedup: if same 2+ teams mentioned, likely same game
+      if (teamsA.size >= 2) {
+        const teamsB = new Set(mNorm.match(teamPattern) || []);
+        const teamOverlap = [...teamsA].filter((t) => teamsB.has(t)).length;
+        if (teamOverlap >= 2) return true;
+      }
     }
     return false;
   }

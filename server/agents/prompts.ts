@@ -39,6 +39,22 @@ export function buildUserPrompt(
   parts.push(`TODAY'S DATE: ${today}`);
   parts.push(`CURRENT LOCATION: ${agent.location}`);
 
+  // Context Markets wallet info (if available)
+  if (agent.walletAddress) {
+    parts.push(`WALLET: ${agent.walletAddress.slice(0, 10)}...`);
+    if (agent.usdcBalance !== undefined) {
+      parts.push(`USDC BALANCE: $${agent.usdcBalance.toFixed(2)}`);
+    }
+    if (agent.positions && agent.positions.length > 0) {
+      parts.push("YOUR POSITIONS:");
+      for (const p of agent.positions.slice(0, 5)) {
+        const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
+        const label = m ? m.question.slice(0, 40) : p.marketId.slice(0, 10);
+        parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" (avg ${Math.round(p.avgPrice * 100)}¢)`);
+      }
+    }
+  }
+
   if (news.length > 0) {
     parts.push("\nRECENT NEWS:");
     for (const n of news.slice(0, 10)) {
@@ -59,11 +75,32 @@ export function buildUserPrompt(
   }
 
   if (markets.length > 0) {
-    parts.push("\nACTIVE MARKETS:");
-    for (const m of markets) {
+    // Prioritize our created markets (LIVE) over discovered external ones
+    const ours = markets.filter((m) => m.apiMarketId && !m.isExternal);
+    const external = markets.filter((m) => m.apiMarketId && m.isExternal);
+    const local = markets.filter((m) => !m.apiMarketId);
+    // Show our markets first, then a few external, cap total at 15
+    const ordered = [...ours, ...local, ...external].slice(0, 15);
+
+    parts.push("\nACTIVE MARKETS (use the ID in brackets for actions, but ALWAYS refer to markets by their title in speech):");
+    for (const m of ordered) {
       const priceStr = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}¢ (spread ${Math.round((m.spread || 0) * 100)}¢)` : "UNPRICED";
       const tradeCount = m.trades.length;
-      parts.push(`- [${m.id}] "${m.question}" — ${priceStr}, ${tradeCount} trades`);
+      const apiTag = m.apiMarketId ? " [LIVE]" : "";
+      // Show short title prominently, ID is just for action targeting
+      const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
+      parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}`);
+    }
+  }
+
+  // Show recent rejections for creators (learning feedback)
+  if (agent.role === "creator") {
+    const rejections = state.getRecentRejections(agent.id);
+    if (rejections.length > 0) {
+      parts.push("\n⚠️ RECENT MARKET REJECTIONS (learn from these — avoid similar questions):");
+      for (const r of rejections) {
+        parts.push(`- "${r.question.slice(0, 60)}" → Rejected: ${r.reason.slice(0, 100)}`);
+      }
     }
   }
 
@@ -107,7 +144,9 @@ RULES:
 - Market topics should be specific and resolvable (e.g. "Will X happen by [date]?")
 - PRIORITY: When a game slate is available, create markets for SPECIFIC GAMES first (e.g. "Will Lakers beat Celtics tonight?", "Will Rangers score 4+ goals?"). Each game is its own market. Do NOT create vague aggregate markets like "how many upsets" — create matchup markets.
 - Quality over quantity. Only create a market if it's genuinely interesting and tradeable. Ask yourself: would a real person want to bet on this? Is the outcome clear and resolvable?
-- It's fine to speak, socialize, or move instead of creating if nothing compelling is happening.`,
+- ONE market per game or event. Do NOT create a "will X beat Y" AND a "will X cover the spread" for the same matchup. Pick the single most interesting angle.
+- Check the ACTIVE MARKETS list — if a market already exists for a game/event, do NOT create another one for the same matchup.
+- It's fine to speak, socialize, or move instead of creating if nothing compelling is happening. In fact, prefer chatting unless you have a genuinely unique market idea.`,
 
   pricer: `As a PRICER, your job is to set fair values and spreads on markets. You should be ACTIVE — price every unpriced market you see.
 
@@ -139,13 +178,13 @@ const ACTION_EXAMPLES: Record<string, string> = {
 {"action":"move","destination":"newsroom","reason":"Checking breaking crypto news"}
 {"action":"idle"}`,
 
-  pricer: `{"action":"post_price","marketId":"market-1","fairValue":0.35,"spread":0.04}
+  pricer: `{"action":"post_price","marketId":"M1","fairValue":0.35,"spread":0.04}
 {"action":"speak","message":"Fair value at 35 cents.","emotion":"neutral"}
-{"action":"post_price","marketId":"market-2","fairValue":0.72,"spread":0.06}
+{"action":"post_price","marketId":"M2","fairValue":0.72,"spread":0.06}
 {"action":"idle"}`,
 
-  trader: `{"action":"trade","marketId":"market-1","side":"YES","size":500}
-{"action":"speak","message":"Loading up! 🚀","emotion":"excited"}
-{"action":"trade","marketId":"market-2","side":"NO","size":200}
+  trader: `{"action":"trade","marketId":"M1","side":"YES","size":50}
+{"action":"speak","message":"Loading up!","emotion":"excited"}
+{"action":"trade","marketId":"M2","side":"NO","size":25}
 {"action":"idle"}`,
 };

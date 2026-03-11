@@ -5,7 +5,7 @@ export type AgentMood = "bullish" | "bearish" | "uncertain" | "confident" | "sca
 export type GameEvent =
   | { type: "agent_move"; agentId: string; destination: string; reason: string }
   | { type: "agent_speak"; agentId: string; message: string; emotion: string; building?: string }
-  | { type: "market_spawning"; marketId: string; question: string; creator: string; building?: string }
+  | { type: "market_spawning"; marketId: string; question: string; creator: string; building?: string; apiMarketId?: string; url?: string }
   | { type: "price_update"; marketId: string; fairValue: number; spread: number; building?: string }
   | { type: "trade_executed"; agentId: string; marketId: string; side: "YES" | "NO"; size: number; price: number; building?: string }
   | { type: "news_alert"; headline: string; source: string; severity: "breaking" | "normal"; building?: string }
@@ -14,7 +14,11 @@ export type GameEvent =
   | { type: "mood_change"; agentId: string; agentName: string; oldMood: AgentMood; newMood: AgentMood; building?: string }
   | { type: "building_selected"; buildingId: string }
   | { type: "agent_directive"; agentId: string; directive: string }
-  | { type: "directive_fulfilled"; agentId: string; agentName: string; directive: string; result: string; building?: string };
+  | { type: "directive_fulfilled"; agentId: string; agentName: string; directive: string; result: string; building?: string }
+  // Context Markets integration events
+  | { type: "market_rejected"; agentId: string; question: string; reason: string; building?: string }
+  | { type: "market_failed"; agentId: string; question: string; reason: string; building?: string }
+  | { type: "markets_synced"; count: number };
 
 let wss: WebSocketServer | null = null;
 

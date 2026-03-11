@@ -4,6 +4,10 @@ config(); // also load .env if present
 import { startWsServer } from "./ws-bridge";
 import { startPoller, stopPoller } from "./signals/poller";
 import { startScheduler, stopScheduler } from "./agents/scheduler";
+import { initializeWallets, stopTopupLoop } from "./context-api/setup";
+import { startSync, stopSync } from "./context-api/sync";
+import { startMarketPoller, stopMarketPoller } from "./context-api/markets";
+import { isContextEnabled } from "./context-api/client";
 
 const WS_PORT = Number(process.env.PORT) || Number(process.env.AGENT_WS_PORT) || 8766;
 
@@ -19,6 +23,8 @@ const envStatus = {
   FIRECRAWL_API_KEY: !!process.env.FIRECRAWL_API_KEY,
   X_BEARER_TOKEN: !!process.env.X_BEARER_TOKEN,
   ODDS_API_KEY: !!process.env.ODDS_API_KEY,
+  CONTEXT_API_KEY: !!process.env.CONTEXT_API_KEY,
+  AGENT_MNEMONIC: !!process.env.AGENT_MNEMONIC,
 };
 
 console.log("[Config] API keys:");
@@ -33,7 +39,24 @@ startWsServer(WS_PORT);
 // 2. Start news pipeline (ESPN, crypto, firecrawl, X feeds)
 startPoller();
 
-// 3. Start agent scheduler
+// 3. Initialize Context Markets wallets (if configured)
+if (isContextEnabled()) {
+  console.log("[Context] Initializing wallets + API integration...");
+  initializeWallets()
+    .then(() => {
+      startSync();
+      startMarketPoller();
+      console.log("[Context] API integration ready");
+    })
+    .catch((err) => {
+      console.error("[Context] Wallet initialization failed:", err);
+      console.warn("[Context] Continuing without Context Markets integration");
+    });
+} else {
+  console.warn("[Context] Skipping — no CONTEXT_API_KEY or AGENT_MNEMONIC");
+}
+
+// 4. Start agent scheduler
 if (envStatus.MINIMAX_API_KEY) {
   startScheduler();
 } else {
@@ -47,11 +70,17 @@ process.on("SIGINT", () => {
   console.log("\n[Server] Shutting down...");
   stopPoller();
   stopScheduler();
+  stopSync();
+  stopMarketPoller();
+  stopTopupLoop();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   stopPoller();
   stopScheduler();
+  stopSync();
+  stopMarketPoller();
+  stopTopupLoop();
   process.exit(0);
 });

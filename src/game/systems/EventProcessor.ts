@@ -105,6 +105,14 @@ export class EventProcessor {
       case "building_selected":
         // Handled by HUD only — no Phaser action needed
         break;
+
+      case "market_rejected":
+      case "market_failed":
+      case "markets_synced":
+      case "agent_directive":
+      case "directive_fulfilled":
+        // Handled by HUD only
+        break;
     }
   }
 
