@@ -659,7 +659,25 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
 
   const addChatMessage = useCallback((msg: Omit<ChatMsg, "id">) => {
     const id = `chat-${nextChatId.current++}`;
-    setChatMessages((prev) => [...prev, { ...msg, id }].slice(-100));
+    setChatMessages((prev) => {
+      const next = [...prev, { ...msg, id }];
+      // Per-building cap: keep last 40 messages per building so quiet rooms don't get flushed
+      if (next.length > 300) {
+        const byBuilding = new Map<string, ChatMsg[]>();
+        for (const m of next) {
+          const b = m.building || "unknown";
+          if (!byBuilding.has(b)) byBuilding.set(b, []);
+          byBuilding.get(b)!.push(m);
+        }
+        const pruned: ChatMsg[] = [];
+        for (const [, msgs] of byBuilding) {
+          pruned.push(...msgs.slice(-40));
+        }
+        pruned.sort((a, b) => a.timestamp - b.timestamp);
+        return pruned;
+      }
+      return next;
+    });
     // Track building activity for nav pulse indicators
     if (msg.building) {
       setRecentBuildingActivity((prev) => {

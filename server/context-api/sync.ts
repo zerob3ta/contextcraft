@@ -254,10 +254,85 @@ async function syncMarkets(): Promise<void> {
       }
     }
 
+    // Detect finished games and locally resolve matching markets
+    detectGameResults();
+
     recordSuccess();
   } catch (err) {
     console.error("[Context Sync] Market sync failed:", err);
     recordFailure();
+  }
+}
+
+/**
+ * Cross-reference finished game scores with active markets.
+ * Locally marks markets as resolving when the game they reference is final.
+ * This fills the gap when the Context Markets API hasn't processed resolution yet.
+ */
+function detectGameResults(): void {
+  const finishedGames = [
+    ...state.liveScores.filter((g) => g.status === "post"),
+    ...state.sportsSlate.filter((g) => g.status === "post"),
+  ];
+  if (finishedGames.length === 0) return;
+
+  for (const market of state.getActiveMarkets()) {
+    // Skip already-resolved markets
+    if (market.resolutionStatus === "pending" || market.resolutionStatus === "resolved") continue;
+    if (market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed") continue;
+
+    const q = market.question.toLowerCase();
+    // Only match sports "Will X beat Y" markets
+    if (!/beat|cover|score|win/i.test(q)) continue;
+
+    for (const game of finishedGames) {
+      // Extract team names from game and check if market references both
+      const teams = [game.homeTeam, game.awayTeam].map((t) => t.toLowerCase());
+      const shortParts = game.shortName.toLowerCase().split(/\s+(?:vs?\.?|@)\s+/);
+
+      const matchesTeam = (team: string) => {
+        // Check full team name or abbreviation in shortName
+        return q.includes(team) || shortParts.some((p) => p.length >= 3 && q.includes(p));
+      };
+
+      if (!teams.some(matchesTeam)) continue;
+
+      // Game is finished and matches this market — determine outcome
+      const homeWon = (game.homeScore ?? 0) > (game.awayScore ?? 0);
+      const homeTeamLower = game.homeTeam.toLowerCase();
+      const awayTeamLower = game.awayTeam.toLowerCase();
+
+      // Figure out which team the market is about (the subject of "Will X beat Y")
+      // Simple heuristic: the first team mentioned in the question
+      const homeIdx = q.indexOf(homeTeamLower);
+      const awayIdx = q.indexOf(awayTeamLower);
+      let subjectIsHome = true;
+      if (homeIdx === -1 && awayIdx >= 0) subjectIsHome = false;
+      else if (awayIdx >= 0 && homeIdx >= 0) subjectIsHome = homeIdx < awayIdx;
+
+      // For "beat" markets: YES if subject team won
+      const subjectWon = subjectIsHome ? homeWon : !homeWon;
+      const outcome = subjectWon ? 0 : 1; // 0=YES, 1=NO
+
+      // Mark as locally resolving
+      market.resolutionStatus = "pending";
+      market.outcome = outcome;
+
+      const outcomeStr = outcome === 0 ? "YES" : "NO";
+      const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+      const scoreStr = `${game.awayScore}-${game.homeScore}`;
+      const headline = `GAME OVER: ${game.shortName} final ${scoreStr}. "${shortQ}" → ${outcomeStr}. Cancel all orders.`;
+
+      console.log(`[Sync:GameResult] ${market.id} "${shortQ}" → ${outcomeStr} (${game.shortName} ${scoreStr})`);
+
+      state.addNews({ headline, snippet: "", source: "Game Result", category: "Markets" });
+      broadcast({ type: "news_alert", headline, source: "Game Result", severity: "breaking", building: "newsroom" });
+      notifyBuildingEvent("newsroom");
+      notifyBuildingEvent("exchange");
+      notifyBuildingEvent("pit");
+
+      break; // One game per market
+    }
   }
 }
 

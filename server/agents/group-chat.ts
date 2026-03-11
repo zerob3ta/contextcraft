@@ -38,7 +38,7 @@ export interface Conviction {
 // ── Constants ──
 
 const SPEAKERS_PER_TICK = 3;
-const MAX_CHAT_LOG = 50;
+const MAX_CHAT_LOG = 100;
 const CONVICTION_DIRECTIVE_THRESHOLD = 60;
 const CONVICTION_DECAY_PER_TICK = 3;
 const MOOD_DECAY_TICKS = 15; // extreme moods decay after 15 ticks without reinforcement
