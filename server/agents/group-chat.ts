@@ -542,14 +542,20 @@ Only include conviction if this conversation genuinely shifted your view on a SP
   const arrival = recentArrivals.get(agent.id);
   if (arrival && arrival.tick >= tickCount - 1) {
     const fromName = BUILDING_DISPLAY_NAMES[arrival.from] || arrival.from;
-    // Get recent messages from the building they came from
-    const fromMsgs = chatLog
-      .filter((m) => m.building === arrival.from)
-      .slice(0, 3)
-      .map((m) => `${m.agentName}: "${m.message}"`)
-      .join(", ");
-    if (fromMsgs) {
-      parts.push(`\nYou just came from ${fromName}. What you heard there: ${fromMsgs}. Reference this naturally in your message.`);
+
+    if (agent.location === "lounge" && (arrival.from === "exchange" || arrival.from === "pit")) {
+      // Returning to lounge from price buildings — summarize as vibes, not numbers
+      parts.push(`\nYou just came back from ${fromName}. You can mention the energy/mood there (busy, quiet, tense, wild) but do NOT repeat any specific prices, percentages, or spreads. Keep it casual.`);
+    } else {
+      // Other buildings: share what you heard
+      const fromMsgs = chatLog
+        .filter((m) => m.building === arrival.from)
+        .slice(0, 3)
+        .map((m) => `${m.agentName}: "${m.message}"`)
+        .join(", ");
+      if (fromMsgs) {
+        parts.push(`\nYou just came from ${fromName}. What you heard there: ${fromMsgs}. Reference this naturally in your message.`);
+      }
     }
     // Clear so they only gossip once
     recentArrivals.delete(agent.id);
@@ -585,6 +591,12 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     // Similarity gate — reject parroting
     if (isTooSimilar(message, chatLog)) {
       console.log(`[Chat] ${agent.name}: rejected (too similar to recent)`);
+      return null;
+    }
+
+    // Lounge price filter — hard reject messages with price/spread talk
+    if (agent.location === "lounge" && containsPriceTalk(message)) {
+      console.log(`[Chat] ${agent.name}: rejected lounge price talk: "${message.slice(0, 60)}"`);
       return null;
     }
 
@@ -642,6 +654,32 @@ function getLengthGuide(agent: AgentState, mood: AgentMood): string {
   return "Keep it SHORT. One sentence, under 80 characters. Think text message, not paragraph.";
 }
 
+// ── Lounge Price Filter ──
+
+/**
+ * Detect price/spread/trading talk that shouldn't appear in the lounge.
+ * Matches patterns like: "52%", "at 0.65", "spread", "fair value", "reprice",
+ * "cents", "¢", percentages in trading context, etc.
+ */
+function containsPriceTalk(message: string): boolean {
+  const m = message.toLowerCase();
+  // Direct price patterns: "52%", "at 65", "$3.50", "0.65"
+  if (/\d+[%¢c]\b/.test(m)) return true;
+  if (/\bat\s+0?\.\d+/.test(m)) return true;
+  if (/\$\d+/.test(m)) return true;
+  // Trading jargon
+  const priceWords = [
+    "fair value", "spread", "reprice", "mispriced", "underpriced", "overpriced",
+    "bid", "ask", "fill", "slippage", "orderbook", "order book",
+    "cents", "basis points", "priced at", "trading at", "pricing",
+    "long position", "short position", "entry point", "exit point",
+  ];
+  for (const word of priceWords) {
+    if (m.includes(word)) return true;
+  }
+  return false;
+}
+
 // ── Similarity Gate ──
 
 function isTooSimilar(newMessage: string, recentMessages: ChatMessage[]): boolean {
@@ -665,6 +703,7 @@ function isTooSimilar(newMessage: string, recentMessages: ChatMessage[]): boolea
 function buildAttentionWindow(agent: AgentState): ChatMessage[] {
   const window: ChatMessage[] = [];
   const seen = new Set<string>();
+  const isLounge = agent.location === "lounge";
 
   // Prioritize messages from the same building (last 6)
   const sameBuilding = chatLog.filter((m) => m.building === agent.location);
@@ -675,9 +714,13 @@ function buildAttentionWindow(agent: AgentState): ChatMessage[] {
     }
   }
 
-  // Also include recent messages from other buildings (last 3, for cross-pollination)
+  // Cross-building messages for context — but lounge only gets lounge + newsroom,
+  // NOT exchange/pit (which are all price talk and contaminate the lounge vibe)
+  const priceBuildings = new Set(["exchange", "pit"]);
   for (const msg of chatLog.slice(0, 15)) {
     if (!seen.has(msg.id) && msg.building !== agent.location) {
+      // Lounge agents skip messages from price-heavy buildings
+      if (isLounge && priceBuildings.has(msg.building)) continue;
       window.push(msg);
       seen.add(msg.id);
       if (window.length >= 9) break;
