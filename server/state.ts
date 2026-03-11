@@ -28,6 +28,13 @@ export interface Market {
   apiMarketId: string | null; // real hex UUID from Context API
   isExternal: boolean; // true = discovered from testnet, false = created by our agents
   apiUrl: string | null;
+  // Resolution status (from Context Markets API)
+  apiStatus: "active" | "pending" | "resolved" | "closed" | null;
+  resolutionStatus: "none" | "pending" | "resolved" | null;
+  proposedAt: number | null;         // when resolution was proposed
+  resolvedAt: number | null;         // when resolution was finalized
+  outcome: number | null;            // 0=YES won, 1=NO won, null=unresolved
+  payoutPcts: number[] | null;       // payout percentages per outcome
   // Oracle + quotes data (from Context Markets AI oracle)
   oracleProb: number | null;        // oracle probability estimate (0-1)
   oracleConfidence: string | null;   // "low" | "medium" | "high"
@@ -227,6 +234,12 @@ class ServerState {
       apiMarketId: null,
       isExternal: false,
       apiUrl: null,
+      apiStatus: null,
+      resolutionStatus: null,
+      proposedAt: null,
+      resolvedAt: null,
+      outcome: null,
+      payoutPcts: null,
       oracleProb: null,
       oracleConfidence: null,
       oracleSummary: null,
@@ -264,6 +277,12 @@ class ServerState {
       apiMarketId: info.apiMarketId,
       isExternal: true,
       apiUrl: null,
+      apiStatus: null,
+      resolutionStatus: null,
+      proposedAt: null,
+      resolvedAt: null,
+      outcome: null,
+      payoutPcts: null,
       oracleProb: null,
       oracleConfidence: null,
       oracleSummary: null,

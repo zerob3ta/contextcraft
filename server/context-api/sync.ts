@@ -4,7 +4,7 @@
  */
 
 import { getAgentClient, getReadClient } from "./client";
-import { state } from "../state";
+import { state, type Market } from "../state";
 import { broadcast } from "../ws-bridge";
 import { ALL_AGENTS } from "../../src/game/config/agents";
 import { notifyBuildingEvent } from "../agents/group-chat";
@@ -114,19 +114,21 @@ async function syncMarkets(): Promise<void> {
   if (!client) return;
 
   try {
-    // Fetch active markets with multiple sort strategies for better coverage
-    const [defaultResult, trendingResult] = await Promise.allSettled([
+    // Fetch markets with multiple strategies — include pending to catch resolutions
+    const [defaultResult, trendingResult, pendingResult] = await Promise.allSettled([
       client.markets.list({ status: "active", limit: 30 }),
       client.markets.list({ status: "active", limit: 20, sortBy: "volume" }),
+      client.markets.list({ status: "pending" as "active", limit: 10 }), // cast needed — pending markets resolving
     ]);
 
     const defaultMarkets = defaultResult.status === "fulfilled" ? (defaultResult.value?.markets ?? []) : [];
     const trendingMarkets = trendingResult.status === "fulfilled" ? (trendingResult.value?.markets ?? []) : [];
+    const pendingMarkets = pendingResult.status === "fulfilled" ? (pendingResult.value?.markets ?? []) : [];
 
     // Merge and deduplicate
     const seen = new Set<string>();
     const apiMarkets: typeof defaultMarkets = [];
-    for (const m of [...defaultMarkets, ...trendingMarkets]) {
+    for (const m of [...defaultMarkets, ...trendingMarkets, ...pendingMarkets]) {
       if (!seen.has(m.id)) {
         seen.add(m.id);
         apiMarkets.push(m);
@@ -140,19 +142,61 @@ async function syncMarkets(): Promise<void> {
       // lastPrice is in raw units (e.g. 615000 = 61.5¢): /10000 → cents, /100 → 0-1 probability
       const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
 
+      // Read resolution status from API market
+      const apiStatus = (m as Record<string, unknown>).status as string | undefined;
+      const resolutionStatus = (m as Record<string, unknown>).resolutionStatus as string | undefined;
+      const proposedAt = (m as Record<string, unknown>).proposedAt as string | null | undefined;
+      const resolvedAt = (m as Record<string, unknown>).resolvedAt as string | null | undefined;
+      const apiOutcome = (m as Record<string, unknown>).outcome as number | null | undefined;
+      const payoutPcts = (m as Record<string, unknown>).payoutPcts as number[] | null | undefined;
+
       // Check if we already track this market
       const existing = state.getMarketByApiId(m.id);
       if (existing) {
-        // Update price if it changed significantly (>3¢ move)
+        // Update resolution status
+        const prevStatus = existing.apiStatus;
+        if (apiStatus) existing.apiStatus = apiStatus as Market["apiStatus"];
+        if (resolutionStatus) existing.resolutionStatus = resolutionStatus as Market["resolutionStatus"];
+        if (proposedAt) existing.proposedAt = new Date(proposedAt).getTime();
+        if (resolvedAt) existing.resolvedAt = new Date(resolvedAt).getTime();
+        if (apiOutcome !== undefined) existing.outcome = apiOutcome;
+        if (payoutPcts) existing.payoutPcts = payoutPcts;
+
+        // Detect status transitions and alert agents
+        if (apiStatus && apiStatus !== prevStatus) {
+          const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+
+          if (resolutionStatus === "pending" || apiStatus === "pending") {
+            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+            const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
+            state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
+            broadcast({ type: "news_alert", headline, source: "Resolution", severity: "breaking", building: "newsroom" });
+            notifyBuildingEvent("newsroom");
+            notifyBuildingEvent("exchange");
+            notifyBuildingEvent("pit");
+          }
+
+          if (apiStatus === "resolved" || apiStatus === "closed") {
+            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+            const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
+            state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
+            broadcast({ type: "news_alert", headline, source: "Resolution", severity: "breaking", building: "newsroom" });
+            notifyBuildingEvent("newsroom");
+            notifyBuildingEvent("exchange");
+            notifyBuildingEvent("pit");
+          }
+        }
+
+        // Update price if it changed significantly (>3pt move)
         if (fairValue !== null && existing.fairValue !== null) {
-          const oldCents = Math.round(existing.fairValue * 100);
-          const newCents = Math.round(fairValue * 100);
-          const delta = Math.abs(newCents - oldCents);
+          const oldPct = Math.round(existing.fairValue * 100);
+          const newPct = Math.round(fairValue * 100);
+          const delta = Math.abs(newPct - oldPct);
           if (delta >= 3) {
             state.updatePrice(existing.id, fairValue, existing.spread || 0);
             const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
-            const dir = newCents > oldCents ? "up" : "down";
-            const headline = `Market update: "${shortQ}" moved ${dir} to ${newCents}% (was ${oldCents}%)`;
+            const dir = newPct > oldPct ? "up" : "down";
+            const headline = `Market update: "${shortQ}" moved ${dir} to ${newPct}% (was ${oldPct}%)`;
             state.addNews({ headline, snippet: "", source: "Market Data", category: "Markets" });
             broadcast({ type: "news_alert", headline, source: "Market Data", severity: "normal", building: "newsroom" });
             notifyBuildingEvent("newsroom");
@@ -210,24 +254,53 @@ async function syncOracleData(): Promise<void> {
     if (market.oracleUpdatedAt && Date.now() - market.oracleUpdatedAt < 60_000) continue;
 
     try {
-      // Fetch oracle data — SDK returns { oracle: { confidenceLevel, summary: { decision, shortSummary, expandedSummary } } }
+      // Fetch oracle quotes — has numeric probability, confidence, reasoning
+      let prob: number | null = null;
+      let confidence: string | null = null;
+      let summary: string | null = null;
+
+      try {
+        const quotesResult = await client.markets.oracleQuotes(market.apiMarketId!);
+        const quotes = quotesResult?.quotes;
+        // Get most recent completed quote
+        const latest = quotes?.filter((q: { status: string }) => q.status === "completed")
+          .sort((a: { createdAt: string }, b: { createdAt: string }) => b.createdAt.localeCompare(a.createdAt))[0];
+        if (latest) {
+          prob = typeof latest.probability === "number" ? latest.probability : null;
+          confidence = latest.confidence || null;
+          summary = latest.reasoning?.slice(0, 150) || null;
+        }
+      } catch {
+        // oracleQuotes may not be available — fall back to oracle summary
+      }
+
+      // Fallback: use oracle summary endpoint for reasoning/decision text
       const oracleResult = await client.markets.oracle(market.apiMarketId!);
       const oracleData = oracleResult?.oracle;
       if (oracleData) {
-        // Extract probability from decision text (e.g. "YES 65%" → 0.65)
-        const decisionText = oracleData.summary?.decision || "";
-        const probMatch = decisionText.match(/(\d+)\s*%/);
-        const isYes = /^yes/i.test(decisionText);
-        let prob: number | null = null;
-        if (probMatch) {
-          const pct = parseInt(probMatch[1], 10);
-          prob = isYes ? pct / 100 : (100 - pct) / 100;
+        // Use summary decision as fallback for probability
+        if (prob === null) {
+          const decisionText = oracleData.summary?.decision || "";
+          const probMatch = decisionText.match(/(\d+)\s*%/);
+          const isYes = /^yes/i.test(decisionText);
+          if (probMatch) {
+            const pct = parseInt(probMatch[1], 10);
+            prob = isYes ? pct / 100 : (100 - pct) / 100;
+          }
         }
+        // Use summary endpoint for richer text
+        if (!summary) {
+          summary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 150) || null;
+        }
+        if (!confidence) {
+          confidence = oracleData.confidenceLevel || null;
+        }
+      }
 
+      {
         const prevProb = market.oracleProb;
         market.oracleProb = prob;
-        market.oracleConfidence = oracleData.confidenceLevel || null;
-        const summary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 120) || null;
+        market.oracleConfidence = confidence;
         market.oracleSummary = summary;
         market.oracleUpdatedAt = Date.now();
 
