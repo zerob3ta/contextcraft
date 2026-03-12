@@ -148,8 +148,8 @@ let spawnTimer: ReturnType<typeof setInterval> | null = null;
 
 const MIN_SPAWN_INTERVAL = 90_000;  // 1.5 min minimum between spawns
 const MAX_SPAWN_INTERVAL = 300_000; // 5 min max
-const MIN_STAY_TICKS = 4;           // stay for at least 4 chat ticks
-const MAX_STAY_TICKS = 10;          // leave after 10 chat ticks max
+const MIN_STAY_TICKS = 15;          // stay for at least 15 chat ticks (~2 min)
+const MAX_STAY_TICKS = 40;          // leave after 40 chat ticks max (~5 min)
 const MAX_ACTIVE_NPCS = 2;          // max 2 NPCs at once
 
 let lastSpawnTime = 0;
