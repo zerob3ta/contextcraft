@@ -640,16 +640,24 @@ export class Agent extends Phaser.GameObjects.Container {
 
     switch (this.agentState) {
       case "chatting": {
-        // Three animated dots (typing indicator)
-        g.fillStyle(0x4ade80, 0.8);
-        g.fillCircle(-4, dotY, 1.5);
-        g.fillCircle(0, dotY, 1.5);
-        g.fillCircle(4, dotY, 1.5);
-        // Pulse animation
+        // Small speech bubble icon
+        const bx = 0;
+        const by = dotY - 2;
+        // Bubble body
+        g.fillStyle(0xffffff, 0.85);
+        g.fillRoundedRect(bx - 7, by - 5, 14, 10, 3);
+        // Tail
+        g.fillTriangle(bx - 2, by + 5, bx + 2, by + 5, bx - 4, by + 9);
+        // Three dots inside
+        g.fillStyle(0x4ade80, 0.9);
+        g.fillCircle(bx - 3, by, 1.2);
+        g.fillCircle(bx, by, 1.2);
+        g.fillCircle(bx + 3, by, 1.2);
+        // Gentle pulse
         this.stateDotTween = this.scene.tweens.add({
           targets: g,
-          alpha: 0.4,
-          duration: 600,
+          alpha: 0.5,
+          duration: 800,
           yoyo: true,
           repeat: -1,
           ease: "Sine.easeInOut",

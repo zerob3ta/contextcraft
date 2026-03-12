@@ -78,7 +78,6 @@ export class EventProcessor {
         break;
 
       case "agent_speak":
-        this.scene.showSpeechBubble(event.agentId, event.message, event.emotion ?? "neutral");
         this.scene.setAgentChatting(event.agentId);
         break;
 
@@ -99,7 +98,6 @@ export class EventProcessor {
         break;
 
       case "chat_message":
-        this.scene.showSpeechBubble(event.agentId, event.message, MOOD_TO_EMOTION[event.mood] ?? "neutral");
         this.scene.setAgentChatting(event.agentId);
         break;
 
