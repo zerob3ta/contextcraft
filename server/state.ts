@@ -36,6 +36,7 @@ export interface Market {
   apiMarketId: string | null; // real hex UUID from Context API
   isExternal: boolean; // true = discovered from testnet, false = created by our agents
   apiUrl: string | null;
+  deadline: string | null; // ISO 8601 deadline from Context API
   // Resolution status (from Context Markets API)
   apiStatus: "active" | "pending" | "resolved" | "closed" | null;
   resolutionStatus: "none" | "pending" | "resolved" | null;
@@ -265,6 +266,7 @@ class ServerState {
       apiMarketId: null,
       isExternal: false,
       apiUrl: null,
+      deadline: null,
       apiStatus: null,
       resolutionStatus: null,
       proposedAt: null,
@@ -308,6 +310,7 @@ class ServerState {
       apiMarketId: info.apiMarketId,
       isExternal: true,
       apiUrl: null,
+      deadline: null,
       apiStatus: null,
       resolutionStatus: null,
       proposedAt: null,

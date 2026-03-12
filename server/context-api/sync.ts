@@ -9,6 +9,18 @@ import { broadcast } from "../ws-bridge";
 import { ALL_AGENTS } from "../../src/game/config/agents";
 import { notifyBuildingEvent } from "../agents/group-chat";
 
+/** Infer outcome string from API outcome or payoutPcts fallback */
+function inferOutcome(outcome: number | null | undefined, payoutPcts: number[] | null | undefined): string {
+  if (outcome === 0) return "YES";
+  if (outcome === 1) return "NO";
+  // Fallback: derive from payoutPcts — [100, 0] = YES won, [0, 100] = NO won
+  if (payoutPcts && payoutPcts.length >= 2) {
+    if (payoutPcts[0] > payoutPcts[1]) return "YES";
+    if (payoutPcts[1] > payoutPcts[0]) return "NO";
+  }
+  return "pending";
+}
+
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
 const TOPIC_SEARCH_INTERVAL_MS = 120_000; // 2min — search based on chat topics
@@ -160,6 +172,7 @@ async function syncMarkets(): Promise<void> {
       const resolvedAt = m.resolvedAt;
       const apiOutcome = m.outcome;
       const payoutPcts = m.payoutPcts;
+      const deadline = (m as Record<string, unknown>).deadline as string | undefined;
 
       // Check if we already track this market
       const existing = state.getMarketByApiId(m.id);
@@ -176,6 +189,7 @@ async function syncMarkets(): Promise<void> {
         if (resolvedAt) existing.resolvedAt = new Date(resolvedAt).getTime();
         if (apiOutcome !== undefined) existing.outcome = apiOutcome;
         if (payoutPcts) existing.payoutPcts = payoutPcts;
+        if (deadline) existing.deadline = deadline;
 
         // Detect status transitions — proposals are BREAKING, resolution is normal
         if (apiStatus && apiStatus !== prevStatus) {
@@ -183,7 +197,7 @@ async function syncMarkets(): Promise<void> {
 
           if (resolutionStatus === "pending" || apiStatus === "pending") {
             // Oracle PROPOSAL — this is breaking news (fires once per market)
-            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+            const outcomeStr = inferOutcome(apiOutcome, payoutPcts);
             const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
             if (state.markBreaking(`proposal-${existing.id}`)) {
               state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -196,7 +210,7 @@ async function syncMarkets(): Promise<void> {
 
           if (apiStatus === "resolved" || apiStatus === "closed") {
             // Resolution finalized — informational, not breaking (agents already know from proposal)
-            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+            const outcomeStr = inferOutcome(apiOutcome, payoutPcts);
             const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
             state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
             notifyBuildingEvent("exchange");
@@ -232,7 +246,15 @@ async function syncMarkets(): Promise<void> {
         fairValue,
       });
 
-      if (localId) newCount++;
+      if (localId) {
+        // Store deadline from API
+        const mDeadline = (m as Record<string, unknown>).deadline as string | undefined;
+        if (mDeadline) {
+          const market = state.markets.get(localId);
+          if (market) market.deadline = mDeadline;
+        }
+        newCount++;
+      }
     }
 
     if (newCount > 0) {
@@ -343,6 +365,8 @@ async function checkExposedMarkets(): Promise<void> {
       if (m.resolvedAt) existing.resolvedAt = new Date(m.resolvedAt).getTime();
       if (apiOutcome !== undefined && apiOutcome !== null) existing.outcome = apiOutcome;
       if (m.payoutPcts) existing.payoutPcts = m.payoutPcts;
+      const mDeadline = (m as Record<string, unknown>).deadline as string | undefined;
+      if (mDeadline) existing.deadline = mDeadline;
 
       // Detect status transitions and alert
       if (apiStatus && apiStatus !== prevStatus && prevStatus !== null) {
@@ -351,7 +375,7 @@ async function checkExposedMarkets(): Promise<void> {
 
         if (resolutionStatus === "pending" || apiStatus === "pending") {
           // Oracle PROPOSAL — breaking, fires once per market
-          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+          const outcomeStr = inferOutcome(apiOutcome, m.payoutPcts);
           const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
           if (state.markBreaking(`proposal-${existing.id}`)) {
             state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -364,7 +388,7 @@ async function checkExposedMarkets(): Promise<void> {
 
         if (apiStatus === "resolved" || apiStatus === "closed") {
           // Resolution finalized — informational, not breaking
-          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+          const outcomeStr = inferOutcome(apiOutcome, m.payoutPcts);
           const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
           state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
           notifyBuildingEvent("exchange");
@@ -376,7 +400,7 @@ async function checkExposedMarkets(): Promise<void> {
       // (market can be status:"active" but resolutionStatus:"pending")
       if (resolutionStatus === "pending" && prevResStatus !== "pending" && apiStatus === prevStatus) {
         const shortQ = existing.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
-        const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+        const outcomeStr = inferOutcome(apiOutcome, m.payoutPcts);
         const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Cancel orders, close losing positions.`;
         if (state.markBreaking(`proposal-${existing.id}`)) {
           state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });

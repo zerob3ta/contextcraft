@@ -182,6 +182,22 @@ export function buildUserPrompt(
         const apiTag = m.apiMarketId ? " [LIVE]" : "";
         const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
 
+        // Deadline awareness
+        let deadlineTag = "";
+        if (m.deadline) {
+          const deadlineMs = new Date(m.deadline).getTime();
+          const remainingMs = deadlineMs - Date.now();
+          if (remainingMs <= 0) {
+            deadlineTag = " ⏰EXPIRED";
+          } else if (remainingMs < 3600_000) {
+            deadlineTag = ` ⏰${Math.round(remainingMs / 60_000)}min left`;
+          } else if (remainingMs < 86400_000) {
+            deadlineTag = ` ⏰${Math.round(remainingMs / 3600_000)}h left`;
+          } else {
+            deadlineTag = ` ⏰${Math.round(remainingMs / 86400_000)}d left`;
+          }
+        }
+
         // Oracle qualitative context for pricers and traders
         let oracleTag = "";
         if ((agent.role === "pricer" || agent.role === "trader") && m.oracleSummary) {
@@ -224,7 +240,7 @@ export function buildUserPrompt(
           }
         }
 
-        parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${oracleTag}${trendTag}${attrTag}`);
+        parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${deadlineTag}${oracleTag}${trendTag}${attrTag}`);
       }
     }
   }
@@ -305,6 +321,10 @@ RULES:
 - Widen your spread when uncertain, tighten when confident.
 - You CANNOT create markets or trade — only price them.
 - Price unpriced markets first, then reprice existing ones as conditions change.
+- DEADLINE: Markets have deadlines shown as ⏰. A market resolves NO if the event hasn't happened by the deadline. Consider:
+  - If an event CANNOT physically occur before the deadline (e.g. playoffs clinch when regular season isn't over), price it near 0 regardless of how likely it is eventually.
+  - As deadline approaches with no resolution, price should decay toward 0 (time decay).
+  - "⏰EXPIRED" means the deadline has passed — this should be priced at 0¢ or have orders cancelled.
 - ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as one input among many — it can be wrong. Form your OWN view based on news and market activity.
 - ATTRIBUTION: Market listings show who is quoting and recent trades. Use this intel:
   - "quoted by Shark, you" means Shark and you are providing liquidity. The price reflects YOUR quotes, not anonymous market wisdom.
@@ -328,6 +348,10 @@ RULES:
 - size = number of CONTRACTS (not dollars). Each contract costs (price in ¢) cents. Example: 50 contracts at 60¢ = $30.
 - Reasonable sizes: 20-200 contracts. Don't request thousands — you'll get clamped.
 - You CANNOT create or price markets — only trade.
+- DEADLINE: Markets have deadlines shown as ⏰. A market resolves NO if the event hasn't happened by the deadline. Factor this into trades:
+  - Don't buy YES on events that can't happen before the deadline — that's throwing money away.
+  - As deadline approaches with no resolution, YES becomes less valuable (time decay). Consider selling YES or buying NO.
+  - "⏰EXPIRED" = deadline passed. Do NOT buy YES on expired markets.
 - ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as context but form your OWN view. The oracle can be wrong.
 - ATTRIBUTION: Market listings show who is quoting and recent trades. Use this intel:
   - "quoted by Shark" means Shark is making the market. The price is Shark's view, not the crowd's.
