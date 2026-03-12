@@ -1312,9 +1312,9 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
         </div>
 
         {/* Center area: canvas + mobile tab panels */}
-        <div className="flex-1 relative min-w-0 min-h-0 flex flex-col">
+        <div className="flex-1 relative min-w-0 min-h-0 flex flex-col overflow-hidden">
           {/* Canvas — always mounted. On mobile, hidden when not on Town tab */}
-          <div className={`md:flex-1 md:relative ${
+          <div className={`md:flex-1 md:relative overflow-hidden ${
             mobileTab === "town" ? "flex-1 relative" : "hidden md:block"
           }`}>
             {children}
