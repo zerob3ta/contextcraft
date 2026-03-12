@@ -616,9 +616,18 @@ export class Agent extends Phaser.GameObjects.Container {
   // ── State Indicator ─────────────────────────────────────
 
   setAgentState(state: AgentState): void {
-    if (state === this.agentState) return;
+    const changed = state !== this.agentState;
     this.agentState = state;
-    this.updateStateIndicator();
+    if (changed) {
+      this.updateStateIndicator();
+    }
+
+    // Hide mood bubble while chatting so chat icon is visible
+    if (state === "chatting" && this.moodBubble) {
+      this.moodBubble.setVisible(false);
+    } else if (state !== "chatting" && this.moodBubble) {
+      this.moodBubble.setVisible(true);
+    }
   }
 
   getAgentState(): AgentState {

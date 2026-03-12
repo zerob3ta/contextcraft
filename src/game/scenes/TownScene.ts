@@ -653,16 +653,23 @@ export class TownScene extends Phaser.Scene {
     agent.setMood(mood);
   }
 
+  private chattingTimers = new Map<string, Phaser.Time.TimerEvent>();
+
   setAgentChatting(agentId: string): void {
     const agent = this.agents.get(agentId);
     if (!agent) return;
     agent.setAgentState("chatting");
-    // Auto-clear after 10s
-    this.time.delayedCall(10000, () => {
+
+    // Reset auto-clear timer (so repeated messages keep the icon alive)
+    const existing = this.chattingTimers.get(agentId);
+    if (existing) existing.destroy();
+
+    this.chattingTimers.set(agentId, this.time.delayedCall(10000, () => {
       if (agent.getAgentState() === "chatting") {
         agent.setAgentState("idle");
       }
-    });
+      this.chattingTimers.delete(agentId);
+    }));
   }
 
   // ── Idle behavior ────────────────────────────────────────
