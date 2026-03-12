@@ -393,14 +393,19 @@ function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: Chat
   // --- Activity (trades, market creation, pricing, directive fulfillment) ---
   if (msg.type === "activity") {
     const lower = msg.message.toLowerCase();
-    const isTrade = lower.includes("bought") || lower.includes("yes $") || lower.includes("no $");
+    const isTrade = lower.includes("bought") || lower.includes("sold") || lower.includes("yes $") || lower.includes("no $");
     const isMarket = lower.includes("created market") || lower.includes("created:");
     const isPrice = lower.includes("priced");
+    const isResearch = lower.includes("researched");
 
     let label: string;
     let labelColor: string;
     let bgColor: string;
-    if (isTrade) {
+    if (isResearch) {
+      label = "RESEARCH";
+      labelColor = "#a3e635";
+      bgColor = "rgba(163, 230, 53, 0.06)";
+    } else if (isTrade) {
       label = "TRADE";
       labelColor = "#fb923c";
       bgColor = "rgba(251, 146, 60, 0.06)";
@@ -413,9 +418,9 @@ function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: Chat
       labelColor = "#67e8f9";
       bgColor = "rgba(103, 232, 249, 0.06)";
     } else {
-      label = "TRADE";
-      labelColor = "#fb923c";
-      bgColor = "rgba(251, 146, 60, 0.06)";
+      label = "ACTION";
+      labelColor = "#94a3b8";
+      bgColor = "rgba(148, 163, 184, 0.06)";
     }
 
     return (
