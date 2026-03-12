@@ -159,14 +159,25 @@ let lastSpawnTime = 0;
 export function startNPCSpawner(): void {
   console.log("[NPCs] Starting NPC visitor spawner...");
 
-  // Initial spawn after 60s
+  // Force first spawn after 30s so we can verify it works
   setTimeout(() => {
-    trySpawnNPC();
-  }, 60_000);
+    console.log("[NPCs] Attempting first spawn...");
+    try {
+      // Force spawn immediately — bypass interval check for the first one
+      const template = NPC_POOL[Math.floor(Math.random() * NPC_POOL.length)];
+      spawnNPC(template);
+    } catch (err) {
+      console.error("[NPCs] First spawn failed:", err);
+    }
+  }, 30_000);
 
   // Check for spawns periodically
   spawnTimer = setInterval(() => {
-    trySpawnNPC();
+    try {
+      trySpawnNPC();
+    } catch (err) {
+      console.error("[NPCs] trySpawnNPC error:", err);
+    }
   }, 30_000); // check every 30s
 }
 
