@@ -672,7 +672,7 @@ function MobileTabBar({ active, onChange }: { active: MobileTab; onChange: (t: M
   ];
 
   return (
-    <div className="flex items-center justify-around bg-[#0f0f1a] border-t border-white/5 pt-2 pb-4 flex-shrink-0 md:hidden">
+    <div className="flex items-center justify-around bg-[#0f0f1a] border-t border-white/5 pt-3 pb-6 flex-shrink-0 md:hidden">
       {tabs.map((t) => {
         const isActive = active === t.id;
         return (
