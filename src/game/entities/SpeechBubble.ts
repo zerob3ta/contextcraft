@@ -23,8 +23,8 @@ const BORDER_RADIUS = 4;
 const FONT_SIZE = 11;
 const LINE_HEIGHT = 14;
 const MAX_LINES = 4;
-const DISPLAY_DURATION = 6000;
-const FADE_DURATION = 500;
+const DISPLAY_DURATION = 4000;
+const FADE_DURATION = 400;
 const MAX_BUBBLES = 2;
 
 export class SpeechBubble extends Phaser.GameObjects.Container {

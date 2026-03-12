@@ -30,11 +30,21 @@ const IDLE_CHAT_MESSAGES: { message: string; emotion: Emotion }[] = [
   { message: "My models are recalibrating...", emotion: "cautious" },
 ];
 
+// Truncate text for speech bubbles — full message goes to HUD chat panel
+function bubbleText(text: string, maxLen = 60): string {
+  if (text.length <= maxLen) return text;
+  // Cut at last space before maxLen
+  const cut = text.lastIndexOf(" ", maxLen);
+  return text.slice(0, cut > 20 ? cut : maxLen) + "…";
+}
+
 export class EventProcessor {
   private scene: TownScene | null = null;
   private timers: ReturnType<typeof setTimeout>[] = [];
   private idleInterval: ReturnType<typeof setInterval> | null = null;
   private externalHandler?: (event: GameEvent) => void;
+  private bubbleQueue: { agentId: string; text: string; emotion: Emotion }[] = [];
+  private bubbleDrainTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Bind to a TownScene instance. Must be called before processing events.
@@ -84,6 +94,9 @@ export class EventProcessor {
 
       case "agent_speak":
         this.scene.setAgentChatting(event.agentId);
+        if (event.message) {
+          this.queueBubble(event.agentId, event.message, event.emotion || "neutral");
+        }
         break;
 
       case "news_alert":
@@ -104,6 +117,10 @@ export class EventProcessor {
 
       case "chat_message":
         this.scene.setAgentChatting(event.agentId);
+        if (event.message) {
+          const emotion: Emotion = event.mood ? (MOOD_TO_EMOTION[event.mood as AgentMood] || "neutral") : "neutral";
+          this.queueBubble(event.agentId, event.message, emotion);
+        }
         break;
 
       case "chat_directive":
@@ -202,6 +219,50 @@ export class EventProcessor {
   }
 
   /**
+   * Queue a speech bubble. Bubbles drain one at a time with staggered delays
+   * so multiple speakers in a tick feel like a conversation, not a wall of text.
+   */
+  private queueBubble(agentId: string, text: string, emotion: Emotion): void {
+    this.bubbleQueue.push({ agentId, text: bubbleText(text), emotion });
+    if (!this.bubbleDrainTimer) {
+      this.drainBubbleQueue();
+    }
+  }
+
+  private drainBubbleQueue(): void {
+    if (!this.scene || this.bubbleQueue.length === 0) {
+      this.bubbleDrainTimer = null;
+      return;
+    }
+
+    const { agentId, text, emotion } = this.bubbleQueue.shift()!;
+
+    // Only show bubble if agent is reasonably close to the camera viewport
+    const agent = this.scene.getAgent(agentId);
+    if (agent) {
+      const cam = this.scene.cameras.main;
+      const bounds = cam.worldView;
+      const margin = 100; // small margin so bubbles near edge still show
+      const ax = agent.x;
+      const ay = agent.y;
+      if (
+        ax >= bounds.x - margin &&
+        ax <= bounds.right + margin &&
+        ay >= bounds.y - margin &&
+        ay <= bounds.bottom + margin
+      ) {
+        this.scene.showSpeechBubble(agentId, text, emotion);
+      }
+    }
+
+    // Stagger next bubble: 800-1500ms apart
+    const delay = 800 + Math.random() * 700;
+    this.bubbleDrainTimer = setTimeout(() => {
+      this.drainBubbleQueue();
+    }, delay);
+  }
+
+  /**
    * Stop all timers and idle loop.
    */
   destroy(): void {
@@ -214,6 +275,12 @@ export class EventProcessor {
       clearInterval(this.idleInterval);
       this.idleInterval = null;
     }
+
+    if (this.bubbleDrainTimer) {
+      clearTimeout(this.bubbleDrainTimer);
+      this.bubbleDrainTimer = null;
+    }
+    this.bubbleQueue = [];
 
     this.scene = null;
     this.externalHandler = undefined;

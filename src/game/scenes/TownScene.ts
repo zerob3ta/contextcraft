@@ -482,6 +482,10 @@ export class TownScene extends Phaser.Scene {
     agent.showSpeech(text, emotion);
   }
 
+  getAgent(agentId: string): Agent | undefined {
+    return this.agents.get(agentId);
+  }
+
   showNewsAlert(headline: string, severity: "breaking" | "normal" = "breaking"): void {
     // Remove existing alert
     if (this.newsAlertContainer) {
