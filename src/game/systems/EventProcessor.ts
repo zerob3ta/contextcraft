@@ -1,7 +1,17 @@
-import type { GameEvent } from "../config/events";
+import type { GameEvent, AgentMood } from "../config/events";
 import { DEMO_TIMELINE } from "../config/events";
 import type { TownScene } from "../scenes/TownScene";
 import type { Emotion } from "../config/agents";
+
+const MOOD_TO_EMOTION: Record<AgentMood, Emotion> = {
+  bullish: "excited",
+  bearish: "frustrated",
+  uncertain: "cautious",
+  confident: "excited",
+  scared: "frustrated",
+  manic: "excited",
+  neutral: "neutral",
+};
 
 const IDLE_CHAT_MESSAGES: { message: string; emotion: Emotion }[] = [
   { message: "Any new markets coming?", emotion: "neutral" },
@@ -68,8 +78,7 @@ export class EventProcessor {
         break;
 
       case "agent_speak":
-        // No canvas bubbles — chat lives in HUD only
-        // Just mark agent as chatting briefly
+        this.scene.showSpeechBubble(event.agentId, event.message, event.emotion ?? "neutral");
         this.scene.setAgentChatting(event.agentId);
         break;
 
@@ -90,7 +99,7 @@ export class EventProcessor {
         break;
 
       case "chat_message":
-        // Chat lives in HUD panel — on canvas just show chatting state
+        this.scene.showSpeechBubble(event.agentId, event.message, MOOD_TO_EMOTION[event.mood] ?? "neutral");
         this.scene.setAgentChatting(event.agentId);
         break;
 
