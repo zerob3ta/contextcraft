@@ -345,6 +345,22 @@ function updateAgentMagnetism(available: AgentState[]): void {
           // Track for gossip-on-arrival
           recentArrivals.set(agent.id, { from: fromBuilding, to: bestBuilding, tick: tickCount });
         }
+      } else if (!bestBuilding && Math.random() < 0.08) {
+        // Idle wandering — ~8% chance per tick to visit a random building
+        const wanderTargets = (ROLE_AFFINITIES[agent.role] || ["newsroom"]);
+        const target = wanderTargets[Math.floor(Math.random() * wanderTargets.length)];
+        const atBuilding = available.filter((a) => a.location === target).length;
+        if (atBuilding < 4) {
+          agentBuildingTicks.set(agent.id, 0);
+          state.moveAgent(agent.id, target as Building);
+          broadcast({
+            type: "agent_move",
+            agentId: agent.id,
+            destination: target,
+            reason: getBuildingPullReason(agent.role, target),
+          });
+          recentArrivals.set(agent.id, { from: "lounge", to: target, tick: tickCount });
+        }
       }
     }
   }

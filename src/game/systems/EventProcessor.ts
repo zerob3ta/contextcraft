@@ -72,6 +72,7 @@ export class EventProcessor {
 
     this.externalHandler?.(event);
 
+    try {
     switch (event.type) {
       case "agent_move":
         this.scene.moveAgent(event.agentId, event.destination);
@@ -138,6 +139,9 @@ export class EventProcessor {
       case "directive_fulfilled":
         // Handled by HUD only
         break;
+    }
+    } catch (err) {
+      console.warn("[EventProcessor] Error processing event:", event.type, err);
     }
   }
 
