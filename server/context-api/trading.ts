@@ -64,6 +64,14 @@ export async function placePricingOrders(
     return false;
   }
 
+  // Pre-flight: reject if market is resolving/resolved/closed
+  if (market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed" ||
+      market.resolutionStatus === "pending" || market.resolutionStatus === "resolved") {
+    console.log(`[Trading] ${agentId}: skipping pricing on ${localMarketId} — market status: ${market.apiStatus}/${market.resolutionStatus}`);
+    await cancelOrders(agentId, localMarketId);
+    return false;
+  }
+
   const client = getAgentClient(agentId);
   if (!client) return false;
 
@@ -209,6 +217,18 @@ export async function placeTrade(
   if (!market?.apiMarketId) {
     console.log(`[Trading] ${agentId}: no API market ID for ${localMarketId}`);
     return false;
+  }
+
+  // Pre-flight: reject if market is resolving/resolved/closed (sells allowed for position exit)
+  if (market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed" ||
+      market.resolutionStatus === "pending" || market.resolutionStatus === "resolved") {
+    if (direction === "buy") {
+      console.log(`[Trading] ${agentId}: blocked buy on ${localMarketId} — market status: ${market.apiStatus}/${market.resolutionStatus}`);
+      await cancelOrders(agentId, localMarketId);
+      return false;
+    }
+    // Sells still allowed to exit positions, but cancel any resting orders first
+    await cancelOrders(agentId, localMarketId);
   }
 
   const client = getAgentClient(agentId);

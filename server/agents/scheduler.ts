@@ -488,6 +488,8 @@ function describeAction(_agent: AgentState, action: AgentAction): string {
 // Track sell attempts to prevent infinite sell loops on resolving markets
 const sellAttempts = new Map<string, number>(); // key: `${agentId}-${marketId}`
 const MAX_SELL_ATTEMPTS = 3;
+// Track cancel-sent so we don't spam the API every tick
+const cancelSent = new Set<string>(); // key: `${agentId}-${marketId}`
 
 /**
  * Pre-tick cleanup: for every agent with open orders on resolving/resolved markets,
@@ -498,21 +500,22 @@ function forceResolveCleanup(): void {
   for (const m of state.getActiveMarkets()) {
     if (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
         m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed") {
-      resolvingMarkets.set(m.id, m);
-      if (m.apiMarketId) resolvingMarkets.set(m.apiMarketId, m);
+      resolvingMarkets.set(m.id, m); // keyed by local ID only to avoid duplicates
     }
   }
   if (resolvingMarkets.size === 0) return;
 
   for (const agent of state.agents.values()) {
-    // Cancel open orders on resolving markets
-    if (agent.openOrders) {
-      for (const order of agent.openOrders) {
-        if (resolvingMarkets.has(order.marketId)) {
-          const m = resolvingMarkets.get(order.marketId)!;
-          if (isContextEnabled() && m.apiMarketId) {
-            console.log(`[Scheduler:ForceCleanup] Canceling ${agent.name}'s orders on resolving ${m.id}`);
-            cancelOrders(agent.id, m.id).catch(() => {});
+    // Cancel ALL orders on resolving markets — don't rely on local openOrders tracking
+    if ((agent.role === "pricer" || agent.role === "trader") && isContextEnabled()) {
+      for (const [, m] of resolvingMarkets) {
+        if (m.apiMarketId) {
+          const key = `${agent.id}-${m.id}`;
+          if (!cancelSent.has(key)) {
+            cancelSent.add(key);
+            cancelOrders(agent.id, m.id).catch(() => {
+              cancelSent.delete(key); // retry on failure
+            });
           }
         }
       }

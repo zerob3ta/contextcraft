@@ -253,10 +253,9 @@ async function syncMarkets(): Promise<void> {
     if (resolvingMarkets.length > 0) {
       const { cancelOrders } = await import("./trading");
       for (const market of resolvingMarkets) {
-        // Cancel orders for every agent that has open orders on this market
+        // Cancel orders for ALL agents — don't rely on local openOrders tracking
         for (const agent of state.agents.values()) {
-          if (agent.openOrders?.some((o) => o.marketId === market.id)) {
-            console.log(`[Sync] Auto-canceling ${agent.name}'s orders on resolving market ${market.id}`);
+          if (agent.role === "pricer" || agent.role === "trader") {
             cancelOrders(agent.id, market.id).catch(() => {});
           }
         }
@@ -388,16 +387,12 @@ async function checkExposedMarkets(): Promise<void> {
         }
       }
 
-      // Auto-cancel orders on this market if it's resolving
+      // Auto-cancel orders on this market if it's resolving — cancel for ALL agents
       if (apiStatus === "pending" || apiStatus === "resolved" || apiStatus === "closed" ||
           resolutionStatus === "pending" || resolutionStatus === "resolved") {
         const { cancelOrders } = await import("./trading");
         for (const agent of state.agents.values()) {
-          const hasOrders = agent.openOrders?.some((o) =>
-            o.marketId === existing.id || o.marketId === apiMarketId
-          );
-          if (hasOrders) {
-            console.log(`[ExposureCheck] Auto-canceling ${agent.name}'s orders on resolving ${existing.id}`);
+          if (agent.role === "pricer" || agent.role === "trader") {
             cancelOrders(agent.id, existing.id).catch(() => {});
           }
         }
