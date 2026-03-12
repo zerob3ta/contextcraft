@@ -9,17 +9,6 @@ import { broadcast } from "../ws-bridge";
 import { ALL_AGENTS } from "../../src/game/config/agents";
 import { notifyBuildingEvent } from "../agents/group-chat";
 
-/** Infer outcome string from API outcome or payoutPcts fallback */
-function inferOutcome(outcome: number | null | undefined, payoutPcts: number[] | null | undefined): string {
-  if (outcome === 0) return "YES";
-  if (outcome === 1) return "NO";
-  // Fallback: derive from payoutPcts — [100, 0] = YES won, [0, 100] = NO won
-  if (payoutPcts && payoutPcts.length >= 2) {
-    if (payoutPcts[0] > payoutPcts[1]) return "YES";
-    if (payoutPcts[1] > payoutPcts[0]) return "NO";
-  }
-  return "pending";
-}
 
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
@@ -197,7 +186,7 @@ async function syncMarkets(): Promise<void> {
 
           if (resolutionStatus === "pending" || apiStatus === "pending") {
             // Oracle PROPOSAL — this is breaking news (fires once per market)
-            const outcomeStr = inferOutcome(apiOutcome, payoutPcts);
+            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
             const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
             if (state.markBreaking(`proposal-${existing.id}`)) {
               state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -210,7 +199,7 @@ async function syncMarkets(): Promise<void> {
 
           if (apiStatus === "resolved" || apiStatus === "closed") {
             // Resolution finalized — informational, not breaking (agents already know from proposal)
-            const outcomeStr = inferOutcome(apiOutcome, payoutPcts);
+            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
             const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
             state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
             notifyBuildingEvent("exchange");
@@ -375,7 +364,7 @@ async function checkExposedMarkets(): Promise<void> {
 
         if (resolutionStatus === "pending" || apiStatus === "pending") {
           // Oracle PROPOSAL — breaking, fires once per market
-          const outcomeStr = inferOutcome(apiOutcome, m.payoutPcts);
+          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
           const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
           if (state.markBreaking(`proposal-${existing.id}`)) {
             state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -388,7 +377,7 @@ async function checkExposedMarkets(): Promise<void> {
 
         if (apiStatus === "resolved" || apiStatus === "closed") {
           // Resolution finalized — informational, not breaking
-          const outcomeStr = inferOutcome(apiOutcome, m.payoutPcts);
+          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
           const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
           state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
           notifyBuildingEvent("exchange");
