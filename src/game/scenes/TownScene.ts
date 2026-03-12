@@ -38,11 +38,11 @@ export class TownScene extends Phaser.Scene {
   private setupCamera(): void {
     const cam = this.cameras.main;
 
-    // World bounds cover all buildings + some padding
-    cam.setBounds(0, 0, 1100, 750);
+    // World bounds: tight fit around buildings + agent slots + speech bubble headroom
+    cam.setBounds(-20, -40, 1080, 740);
 
     // Center the camera on the town
-    cam.centerOn(550, 375);
+    cam.centerOn(520, 360);
 
     // --- Drag-to-pan ---
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
@@ -82,7 +82,7 @@ export class TownScene extends Phaser.Scene {
       const [p1, p2] = pointers;
       const dist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
       const scale = dist / this._pinchStartDist!;
-      cam.zoom = Phaser.Math.Clamp(this._pinchStartZoom! * scale, 0.5, 3);
+      cam.zoom = Phaser.Math.Clamp(this._pinchStartZoom! * scale, 1, 3);
     });
 
     this.input.on("pointerup", () => {
@@ -96,7 +96,7 @@ export class TownScene extends Phaser.Scene {
     // --- Scroll-wheel zoom (desktop) ---
     this.input.on("wheel", (_pointer: Phaser.Input.Pointer, _go: unknown[], _dx: number, dy: number) => {
       const newZoom = cam.zoom - dy * 0.001;
-      cam.zoom = Phaser.Math.Clamp(newZoom, 0.5, 3);
+      cam.zoom = Phaser.Math.Clamp(newZoom, 1, 3);
     });
   }
 
@@ -109,23 +109,23 @@ export class TownScene extends Phaser.Scene {
   private drawGround(): void {
     const gfx = this.add.graphics();
 
-    // Grass base
+    // Grass base — sized to camera bounds with small bleed
     gfx.fillStyle(0x2d5a27, 1);
-    gfx.fillRect(0, 0, 2000, 1200);
+    gfx.fillRect(-40, -60, 1160, 820);
 
     // Subtle grass texture with darker patches
     gfx.fillStyle(0x245020, 0.4);
-    for (let i = 0; i < 60; i++) {
-      const x = Math.random() * 2000;
-      const y = Math.random() * 1200;
+    for (let i = 0; i < 40; i++) {
+      const x = -40 + Math.random() * 1160;
+      const y = -60 + Math.random() * 820;
       gfx.fillRect(x, y, 8 + Math.random() * 16, 4 + Math.random() * 8);
     }
 
     // Lighter grass highlights
     gfx.fillStyle(0x3a7a33, 0.3);
-    for (let i = 0; i < 40; i++) {
-      const x = Math.random() * 2000;
-      const y = Math.random() * 1200;
+    for (let i = 0; i < 25; i++) {
+      const x = -40 + Math.random() * 1160;
+      const y = -60 + Math.random() * 820;
       gfx.fillRect(x, y, 4 + Math.random() * 12, 4 + Math.random() * 6);
     }
 
