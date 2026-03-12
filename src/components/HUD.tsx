@@ -672,19 +672,21 @@ function MobileTabBar({ active, onChange }: { active: MobileTab; onChange: (t: M
   ];
 
   return (
-    <div className="flex items-center justify-around pt-3 pb-2 flex-shrink-0 md:hidden" style={{ background: "linear-gradient(to top, rgba(15,15,26,0.95) 60%, transparent)" }}>
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-2 px-3 py-2 rounded-full md:hidden"
+      style={{ background: "rgba(15,15,26,0.85)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", border: "1px solid rgba(255,255,255,0.1)" }}
+    >
       {tabs.map((t) => {
         const isActive = active === t.id;
         return (
           <button
             key={t.id}
             onClick={() => onChange(t.id)}
-            className={`flex flex-col items-center gap-1 transition-colors ${
-              isActive ? "text-[#a3e635]" : "text-white/35"
+            className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-full transition-all ${
+              isActive ? "text-[#a3e635] bg-[#a3e635]/10" : "text-white/40"
             }`}
           >
             {t.icon}
-            <span className="text-[9px] font-mono">{t.label}</span>
+            <span className="text-[8px] font-mono">{t.label}</span>
           </button>
         );
       })}
@@ -1382,7 +1384,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
         </div>
       </div>
 
-      {/* Mobile bottom tab bar */}
+      {/* Mobile floating tab bar */}
       <MobileTabBar active={mobileTab} onChange={setMobileTab} />
     </>
   );
