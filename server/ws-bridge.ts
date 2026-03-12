@@ -18,7 +18,8 @@ export type GameEvent =
   // Context Markets integration events
   | { type: "market_rejected"; agentId: string; question: string; reason: string; building?: string }
   | { type: "market_failed"; agentId: string; question: string; reason: string; building?: string }
-  | { type: "markets_synced"; count: number };
+  | { type: "markets_synced"; count: number }
+  | { type: "briefing_updated"; count: number; categories: string[] };
 
 let wss: WebSocketServer | null = null;
 

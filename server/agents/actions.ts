@@ -1,5 +1,7 @@
 import type { Building, Emotion, AgentRole } from "../../src/game/config/agents";
 
+export type ResearchSource = "sports" | "web" | "x" | "url";
+
 export type AgentAction =
   | { action: "move"; destination: Building; reason: string }
   | { action: "speak"; message: string; emotion: Emotion }
@@ -7,6 +9,7 @@ export type AgentAction =
   | { action: "post_price"; marketId: string; fairValue: number; spread: number }
   | { action: "trade"; marketId: string; side: "YES" | "NO"; size: number; direction: "buy" | "sell" }
   | { action: "cancel_orders"; marketId: string }
+  | { action: "research"; query: string; source: ResearchSource }
   | { action: "idle" };
 
 const VALID_BUILDINGS: Set<string> = new Set(["newsroom", "workshop", "exchange", "pit", "lounge"]);
@@ -69,6 +72,14 @@ export function validateAction(raw: unknown, role: AgentRole): AgentAction {
       const marketId = String(obj.marketId || "");
       if (!marketId) return { action: "idle" };
       return { action: "cancel_orders", marketId };
+    }
+
+    case "research": {
+      const query = String(obj.query || "").slice(0, 200);
+      if (!query) return { action: "idle" };
+      const validSources: Set<string> = new Set(["sports", "web", "x", "url"]);
+      const source = validSources.has(String(obj.source)) ? String(obj.source) as ResearchSource : "web";
+      return { action: "research", query, source };
     }
 
     case "idle":

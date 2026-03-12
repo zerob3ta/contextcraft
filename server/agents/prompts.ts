@@ -80,14 +80,27 @@ export function buildUserPrompt(
     }
   }
 
-  if (news.length > 0) {
-    parts.push("\nRECENT NEWS:");
-    for (const n of news.slice(0, 10)) {
-      const ago = Math.round((Date.now() - n.timestamp) / 60_000);
-      parts.push(`- [${n.category}] ${n.headline} (${ago}min ago)`);
+  // Daily briefing — wide editorial scan, refreshed every 30 min
+  const briefing = state.dailyBriefing;
+  if (briefing && briefing.items.length > 0) {
+    const ago = Math.round((Date.now() - briefing.generatedAt) / 60_000);
+    parts.push(`\nTODAY'S BRIEFING (updated ${ago} min ago):`);
+    for (const item of briefing.items) {
+      const mTag = item.marketability === "high" ? " ★" : "";
+      parts.push(`- [${item.category}] ${item.headline}${mTag}`);
     }
   } else {
-    parts.push("\nNo recent news.");
+    parts.push("\nNo briefing available yet.");
+  }
+
+  // Breaking news alerts (only recent, last 30 min — these are one-time events)
+  const recentBreaking = news.filter((n) => Date.now() - n.timestamp < 30 * 60_000);
+  if (recentBreaking.length > 0) {
+    parts.push("\n🚨 BREAKING:");
+    for (const n of recentBreaking.slice(0, 5)) {
+      const ago = Math.round((Date.now() - n.timestamp) / 60_000);
+      parts.push(`- ${n.headline} (${ago}min ago)`);
+    }
   }
 
   // Give creators the sports slate for game-specific markets
@@ -186,7 +199,30 @@ export function buildUserPrompt(
           }
         }
 
-        parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${oracleTag}${trendTag}`);
+        // Attribution: who's quoting and who traded recently
+        let attrTag = "";
+        if (agent.role === "pricer" || agent.role === "trader") {
+          // Find which pricers have active orders on this market
+          const quoters: string[] = [];
+          for (const [, a] of state.agents) {
+            if (a.role === "pricer" && a.openOrders?.some((o) => o.marketId === m.id || o.marketId === m.apiMarketId)) {
+              quoters.push(a.id === agent.id ? "you" : a.name);
+            }
+          }
+          if (quoters.length > 0) attrTag += ` | quoted by ${quoters.join(", ")}`;
+
+          // Recent trades with agent names (last 3)
+          if (m.trades.length > 0) {
+            const recentTrades = m.trades.slice(-3).reverse().map((t) => {
+              const traderAgent = state.agents.get(t.agentId);
+              const name = t.agentId === agent.id ? "YOU" : (traderAgent?.name || t.agentId);
+              return `${name} ${t.side} ${t.size}x`;
+            });
+            attrTag += ` | last: ${recentTrades.join(", ")}`;
+          }
+        }
+
+        parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${oracleTag}${trendTag}${attrTag}`);
       }
     }
   }
@@ -207,6 +243,15 @@ export function buildUserPrompt(
     for (const n of marketNews) {
       parts.push(`- ${n.headline}`);
     }
+  }
+
+  // Research results from previous tick (consumed once, then cleared)
+  if (agent.researchResult) {
+    parts.push(`\n📋 RESEARCH RESULTS (your query: "${agent.researchQuery}"):`);
+    parts.push(agent.researchResult);
+    // Clear after injecting — one-time consumption
+    agent.researchResult = null;
+    agent.researchQuery = null;
   }
 
   // Hard directive — if set, this is the agent's mandatory next action
@@ -244,7 +289,8 @@ RULES:
 - Quality over quantity. Only create a market if it's genuinely interesting and tradeable. Ask yourself: would a real person want to bet on this? Is the outcome clear and resolvable?
 - ONE market per game or event. Do NOT create a "will X beat Y" AND a "will X cover the spread" for the same matchup. Pick the single most interesting angle.
 - Check the ACTIVE MARKETS list — if a market already exists for a game/event, do NOT create another one for the same matchup.
-- It's fine to speak, socialize, or move instead of creating if nothing compelling is happening. In fact, prefer chatting unless you have a genuinely unique market idea.`,
+- It's fine to speak, socialize, or move instead of creating if nothing compelling is happening. In fact, prefer chatting unless you have a genuinely unique market idea.
+- RESEARCH: When in the newsroom, you can use the "research" action to look things up before creating. Use it to check scores, search the web, search X/Twitter, or scrape a URL. Results appear in your next prompt. ALWAYS research before creating sports markets to verify game status.`,
 
   pricer: `As a PRICER (market maker), your job is to provide liquidity on both sides of prediction markets.
 
@@ -258,10 +304,15 @@ RULES:
 - You CANNOT create markets or trade — only price them.
 - Price unpriced markets first, then reprice existing ones as conditions change.
 - ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as one input among many — it can be wrong. Form your OWN view based on news and market activity.
+- ATTRIBUTION: Market listings show who is quoting and recent trades. Use this intel:
+  - "quoted by Shark, you" means Shark and you are providing liquidity. The price reflects YOUR quotes, not anonymous market wisdom.
+  - "last: Whale YES 500x, YOU NO 200x" means the recent activity is from specific agents, not the crowd. Don't treat teammate activity as independent market signal.
+  - If a price move was caused by a single agent's trade, that's less informative than broad participation.
 - RESOLUTION: If a market is in the RESOLVING/RESOLVED section, you MUST act immediately:
   1. Cancel ALL your orders on that market using cancel_orders
   2. Do NOT place new orders on it
-  This is your HIGHEST PRIORITY — resolving markets take precedence over everything else.`,
+  This is your HIGHEST PRIORITY — resolving markets take precedence over everything else.
+- RESEARCH: When in the newsroom, you can use the "research" action to look up information before pricing. Check scores, search the web, search X/Twitter, or scrape a URL. Results appear in your next prompt.`,
 
   trader: `As a TRADER, your job is to take positions on prediction markets — buy when you see value, sell when the thesis changes.
 
@@ -275,27 +326,38 @@ RULES:
 - Bigger size = higher conviction. But manage risk — don't put everything on one trade.
 - You CANNOT create or price markets — only trade.
 - ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as context but form your OWN view. The oracle can be wrong.
+- ATTRIBUTION: Market listings show who is quoting and recent trades. Use this intel:
+  - "quoted by Shark" means Shark is making the market. The price is Shark's view, not the crowd's.
+  - "last: YOU YES 200x, Degen NO 100x" tells you the recent flow. Don't say "the market thinks X" when it's just one agent.
+  - A price set by a single pricer is that pricer's opinion. A price with multiple quoters and diverse trades is stronger signal.
 - RESOLUTION: If a market is in the RESOLVING/RESOLVED section, you MUST act immediately:
   1. Cancel ALL your orders on that market using cancel_orders
   2. SELL any positions marked ❌LOSING using a sell trade — these will be worthless
   3. Do NOT place new orders or buy more
-  This is your HIGHEST PRIORITY — resolving markets take precedence over everything else.`,
+  This is your HIGHEST PRIORITY — resolving markets take precedence over everything else.
+- RESEARCH: When in the newsroom, you can use the "research" action to look up information before trading. Check scores, search the web, search X/Twitter, or scrape a URL. Results appear in your next prompt.`,
 };
 
 const ACTION_EXAMPLES: Record<string, string> = {
   creator: `{"action":"create_market","topic":"Bitcoin ETF inflows hitting new record, question about BTC 200K"}
+{"action":"research","query":"Lakers Celtics","source":"sports"}
+{"action":"research","query":"bitcoin ETF inflows","source":"web"}
+{"action":"research","query":"bitcoin sentiment","source":"x"}
 {"action":"speak","message":"This could be huge!","emotion":"excited"}
 {"action":"move","destination":"newsroom","reason":"Checking breaking crypto news"}
 {"action":"idle"}`,
 
   pricer: `{"action":"post_price","marketId":"M1","fairValue":0.35,"spread":0.04}
 {"action":"post_price","marketId":"M1","fairValue":0.40,"spread":0.03}
+{"action":"research","query":"Lakers score tonight","source":"sports"}
 {"action":"speak","message":"Repricing — news shifted my view.","emotion":"neutral"}
 {"action":"idle"}`,
 
   trader: `{"action":"trade","marketId":"M1","side":"YES","size":50,"direction":"buy"}
 {"action":"trade","marketId":"M1","side":"YES","size":30,"direction":"sell"}
 {"action":"cancel_orders","marketId":"M2"}
+{"action":"research","query":"Fed rate decision","source":"web"}
+{"action":"research","query":"$BTC sentiment","source":"x"}
 {"action":"speak","message":"Cutting my position — thesis invalidated.","emotion":"cautious"}
 {"action":"idle"}`,
 };

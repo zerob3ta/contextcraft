@@ -86,3 +86,41 @@ export async function fetchMultiUserPosts(
     return db - da;
   });
 }
+
+/**
+ * Search recent tweets (last 7 days) by query.
+ * Requires Basic or Pro X API tier.
+ */
+export async function searchXPosts(
+  query: string,
+  maxResults = 10
+): Promise<XPost[]> {
+  const api = getClient();
+  if (!api) return [];
+
+  try {
+    const result = await api.v2.search(query, {
+      max_results: Math.min(Math.max(maxResults, 10), 100),
+      "tweet.fields": ["created_at", "public_metrics", "author_id"],
+      expansions: ["author_id"],
+      "user.fields": ["username"],
+    });
+
+    const users = new Map<string, string>();
+    for (const u of result.includes?.users || []) {
+      users.set(u.id, u.username);
+    }
+
+    return (result.data?.data || []).map((t) => ({
+      id: t.id,
+      text: t.text,
+      authorUsername: users.get(t.author_id || "") || "unknown",
+      createdAt: t.created_at || "",
+      likes: t.public_metrics?.like_count || 0,
+      retweets: t.public_metrics?.retweet_count || 0,
+    }));
+  } catch (err) {
+    console.error(`[X] Search error for "${query}":`, err);
+    return [];
+  }
+}

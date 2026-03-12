@@ -1,15 +1,30 @@
 /**
- * News loop runner — manages all 14 loops from the news-loops config.
- * Each loop fetches from its source, runs through quality gate, and emits headlines.
+ * News system — two layers:
+ *
+ * 1. BRIEFING (every 30 min): Wide editorial scan across 18+ sources.
+ *    One LLM call produces 15-25 stories. Cached in state.dailyBriefing.
+ *    Agents see this as their "TODAY'S BRIEFING" in prompts.
+ *
+ * 2. REAL-TIME FEEDS (structured data, no LLM cost):
+ *    - ESPN scores (5m) → state.liveScores, state.sportsSlate
+ *    - Crypto prices (10m) → state.cryptoPrices
+ *    - Odds (30m) → attached to sportsSlate
+ *    These are queryable state, not news headlines.
+ *
+ * 3. BREAKING ALERTS (push, fires exactly once per event):
+ *    - Game finals (from ESPN score change detection)
+ *    - Crypto >5% moves (from CoinGecko)
+ *    - @cnnbrk / @DeItaone new posts (from X timelines)
+ *    - Oracle proposals (from Context Markets sync)
+ *    Each breaking event is keyed and can only fire once.
  */
 
 import { fetchScoreboard, type EspnGame } from "./fetchers/espn";
 import { fetchCryptoPrices } from "./fetchers/coingecko";
-import { scrapePage } from "./fetchers/firecrawl";
 import { fetchUserPosts, fetchMultiUserPosts } from "./fetchers/x-api";
 import { fetchOdds } from "./fetchers/odds";
-import { qualityGate, directHeadline } from "./quality-gate";
-import { state, type NewsItem } from "../state";
+import { generateBriefing } from "./briefing";
+import { state } from "../state";
 import { broadcast } from "../ws-bridge";
 import { notifyBuildingEvent } from "../agents/group-chat";
 import { searchMarketsForNews } from "../context-api/sync";
@@ -20,27 +35,23 @@ const timeouts: ReturnType<typeof setTimeout>[] = [];
 
 // Track previous scores for change detection
 let prevScores = new Map<string, string>();
-// Track seen X post IDs
+// Track seen X post IDs (prevent re-processing same post)
 const seenPostIds = new Set<string>();
 
 export function startPoller(): void {
-  console.log("[Poller] Starting news loops...");
+  console.log("[Poller] Starting news system (briefing + real-time + breaking)...");
 
-  // Stagger loop starts to avoid thundering herd
-  scheduleLoop("espn-daily-slate", loop1_dailySlate, 0, 4 * 60 * 60_000);     // every 4h, start immediately
-  scheduleLoop("espn-live-scores", loop2_liveScores, 30_000, 5 * 60_000);      // every 5m
-  scheduleLoop("espn-headlines", loop3_espnHeadlines, 60_000, 10 * 60_000);    // every 10m
-  scheduleLoop("drudge", loop4_drudge, 90_000, 15 * 60_000);                   // every 15m
-  scheduleLoop("cnn-breaking", loop5_cnnBreaking, 120_000, 10 * 60_000);       // every 10m
-  scheduleLoop("crypto-prices", loop6_cryptoPrices, 150_000, 10 * 60_000);     // every 10m
-  scheduleLoop("crypto-news", loop7_cryptoNews, 180_000, 20 * 60_000);         // every 20m
-  scheduleLoop("finance-x", loop8_financeX, 210_000, 8 * 60_000);             // every 8m
-  scheduleLoop("cnn-culture", loop9_cnnCulture, 240_000, 30 * 60_000);        // every 30m
-  scheduleLoop("vulture", loop10_vulture, 270_000, 30 * 60_000);              // every 30m
-  scheduleLoop("ew", loop11_ew, 300_000, 30 * 60_000);                        // every 30m
-  scheduleLoop("weather", loop12_weather, 330_000, 2 * 60 * 60_000);          // every 2h
-  scheduleLoop("hackernews", loop13_hackernews, 360_000, 15 * 60_000);        // every 15m
-  scheduleLoop("techmeme", loop14_techmeme, 390_000, 15 * 60_000);            // every 15m
+  // ── Briefing (every 30 min) ──
+  scheduleLoop("briefing", runBriefing, 5_000, 30 * 60_000);
+
+  // ── Real-time structured feeds ──
+  scheduleLoop("espn-daily-slate", refreshSportsSlate, 0, 4 * 60 * 60_000);      // every 4h
+  scheduleLoop("espn-live-scores", refreshLiveScores, 30_000, 5 * 60_000);       // every 5m
+  scheduleLoop("crypto-prices", refreshCryptoPrices, 60_000, 10 * 60_000);       // every 10m
+  scheduleLoop("odds", refreshOdds, 90_000, 30 * 60_000);                        // every 30m
+
+  // ── Breaking news feeds (X accounts that post breaking-only content) ──
+  scheduleLoop("breaking-x", checkBreakingX, 120_000, 8 * 60_000);              // every 8m
 }
 
 export function stopPoller(): void {
@@ -62,19 +73,23 @@ function scheduleLoop(id: string, fn: () => Promise<void>, initialDelayMs: numbe
   timeouts.push(t);
 }
 
-function emitHeadline(headline: string, source: string, category: string, severity: "breaking" | "normal"): void {
+// ── Breaking News Emit (fires exactly once per event) ──
+
+function emitBreaking(key: string, headline: string, source: string, category: string): void {
+  // Each breaking event can only fire ONCE — keyed by a unique identifier
+  if (!state.markBreaking(key)) return;
+
   const item = state.addNews({ headline, snippet: "", source, category });
-  if (!item) return; // duplicate
+  if (!item) return; // dedup caught it
 
   broadcast({
     type: "news_alert",
     headline: item.headline,
     source: item.source,
-    severity,
+    severity: "breaking" as const,
     building: "newsroom",
   });
 
-  // Notify magnetism system so agents are attracted to newsroom
   notifyBuildingEvent("newsroom");
 
   // Search Context Markets for related markets (non-blocking)
@@ -82,19 +97,17 @@ function emitHeadline(headline: string, source: string, category: string, severi
     searchMarketsForNews(headline).catch(() => {});
   }
 
-  console.log(`[News:${severity}] ${headline.slice(0, 70)}`);
+  console.log(`[Breaking] ${headline.slice(0, 70)}`);
 
-  // Reactive chatter: random agent reacts to breaking news
-  if (severity === "breaking" && Math.random() < 0.6) {
+  // Reactive chatter: random agent reacts
+  if (Math.random() < 0.5) {
     const agents = Array.from(state.agents.values());
     const reactor = agents[Math.floor(Math.random() * agents.length)];
     const shortHL = headline.length > 40 ? headline.slice(0, 37) + "..." : headline;
     const reactions = [
       `Whoa — ${shortHL}`,
-      `${shortHL}! Market implications...`,
       `Did you see this?! ${shortHL}`,
       `${shortHL} — this changes things`,
-      `Breaking! ${shortHL}`,
       `Big if true: ${shortHL}`,
     ];
     const msg = reactions[Math.floor(Math.random() * reactions.length)];
@@ -110,9 +123,30 @@ function emitHeadline(headline: string, source: string, category: string, severi
   }
 }
 
-// ─── Loop 1: ESPN Daily Slate ──────────────────────────────────────
+// ── 1. Briefing Loop ──
 
-async function loop1_dailySlate(): Promise<void> {
+async function runBriefing(): Promise<void> {
+  const items = await generateBriefing();
+  if (items.length === 0) return;
+
+  state.dailyBriefing = {
+    items,
+    generatedAt: Date.now(),
+  };
+
+  console.log(`[Briefing] Cached ${items.length} items`);
+
+  // Broadcast to frontend for ticker
+  broadcast({
+    type: "briefing_updated",
+    count: items.length,
+    categories: [...new Set(items.map((i) => i.category))],
+  });
+}
+
+// ── 2. Real-Time Structured Feeds ──
+
+async function refreshSportsSlate(): Promise<void> {
   const leagues = ["nba", "ncaab", "nhl"];
   const allGames: EspnGame[] = [];
 
@@ -123,33 +157,34 @@ async function loop1_dailySlate(): Promise<void> {
 
   if (allGames.length === 0) return;
 
-  // Fetch odds for NBA
-  const nbaOdds = await fetchOdds("nba");
-  const oddsMap = new Map(nbaOdds.map((o) => [`${o.awayTeam} @ ${o.homeTeam}`, o]));
+  // Store full game data — no headlines emitted, just state
+  state.sportsSlate = allGames.map((g) => ({
+    ...g,
+    spread: null,
+    overUnder: null,
+  }));
 
-  // Build a single "today's slate" headline
-  const preGames = allGames.filter((g) => g.status === "pre");
-  if (preGames.length > 0) {
-    const count = preGames.length;
-    const leagues = [...new Set(preGames.map((g) => g.league))].join(", ");
-    const headline = `Today's slate: ${count} games across ${leagues}`;
-    emitHeadline(headline, "ESPN", "Sports", "normal");
-  }
-
-  // Store full game data in state for agent context
-  state.sportsSlate = allGames.map((g) => {
-    const odds = oddsMap.get(`${g.awayTeam} @ ${g.homeTeam}`);
-    return {
-      ...g,
-      spread: odds?.spread ?? null,
-      overUnder: odds?.overUnder ?? null,
-    };
-  });
+  console.log(`[Slate] ${allGames.length} games loaded`);
 }
 
-// ─── Loop 2: ESPN Live Scores ──────────────────────────────────────
+async function refreshOdds(): Promise<void> {
+  const leagueKeys = ["nba", "ncaab", "nhl", "nfl", "mlb"] as const;
+  const allOdds = (await Promise.all(leagueKeys.map((k) => fetchOdds(k)))).flat();
+  if (allOdds.length === 0) return;
 
-async function loop2_liveScores(): Promise<void> {
+  const oddsMap = new Map(allOdds.map((o) => [`${o.awayTeam} @ ${o.homeTeam}`, o]));
+
+  // Attach odds to existing slate
+  for (const game of state.sportsSlate) {
+    const odds = oddsMap.get(`${game.awayTeam} @ ${game.homeTeam}`);
+    if (odds) {
+      game.spread = odds.spread ?? null;
+      game.overUnder = odds.overUnder ?? null;
+    }
+  }
+}
+
+async function refreshLiveScores(): Promise<void> {
   const leagues = ["nba", "ncaab", "nhl"];
   const allGames: EspnGame[] = [];
 
@@ -166,54 +201,47 @@ async function loop2_liveScores(): Promise<void> {
     const prev = prevScores.get(key);
 
     if (game.status === "post" && prev !== "final") {
-      // Game just ended — breaking
+      // Game just ended — BREAKING (fires exactly once per game ID)
       const headline = `Final: ${game.shortName} ${game.awayScore}-${game.homeScore}`;
-      emitHeadline(headline, "ESPN", "Sports", "breaking");
+      emitBreaking(`game-final-${game.id}`, headline, "ESPN", "Sports");
       prevScores.set(key, "final");
     } else if (game.status === "in" && prev !== scoreStr) {
-      // Score changed — normal update (stored for agents, not always broadcast)
       prevScores.set(key, scoreStr);
-      // Only broadcast if significant (e.g. halftime, end of quarter)
-      if (game.statusDetail.includes("Half") || game.statusDetail.includes("End")) {
-        const headline = `${game.shortName}: ${game.awayScore}-${game.homeScore} (${game.statusDetail})`;
-        emitHeadline(headline, "ESPN", "Sports", "normal");
-      }
+      // In-game updates stored as state only, no headlines
     }
   }
 
-  // Update state for agent context
+  // Update live scores state
   state.liveScores = allGames.filter((g) => g.status === "in");
 }
 
-// ─── Loop 3: ESPN Headlines (Firecrawl) ────────────────────────────
+async function refreshCryptoPrices(): Promise<void> {
+  const prices = await fetchCryptoPrices();
+  if (prices.length === 0) return;
 
-async function loop3_espnHeadlines(): Promise<void> {
-  const page = await scrapePage("https://www.espn.com");
-  if (!page) return;
-
-  const headlines = await qualityGate(page.markdown, "Sports", "ESPN homepage — look for breaking sports news only");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "ESPN", "Sports", h.severity);
+  // Check for major moves BEFORE updating state (compare against previous)
+  const prevPrices = new Map(state.cryptoPrices.map((p) => [p.symbol, p]));
+  for (const p of prices) {
+    if (Math.abs(p.change24h) >= 5) {
+      const dir = p.change24h > 0 ? "up" : "down";
+      const headline = `${p.symbol} ${dir} ${Math.abs(p.change24h).toFixed(1)}% — $${p.price.toLocaleString()}`;
+      // Key by symbol + direction + rounded magnitude → fires once per move
+      const magBucket = Math.floor(Math.abs(p.change24h) / 5) * 5;
+      emitBreaking(`crypto-${p.symbol}-${dir}-${magBucket}pct`, headline, "CoinGecko", "Crypto");
+    }
   }
+
+  // Store for agent context
+  state.cryptoPrices = prices;
 }
 
-// ─── Loop 4: Drudge Report (Firecrawl) ─────────────────────────────
+// ── 3. Breaking X Feeds ──
 
-async function loop4_drudge(): Promise<void> {
-  const page = await scrapePage("https://www.drudgereport.com");
-  if (!page) return;
+async function checkBreakingX(): Promise<void> {
+  // Only check accounts that post genuinely breaking content
+  const posts = await fetchMultiUserPosts(["cnnbrk", "DeItaone"], 5);
 
-  const headlines = await qualityGate(page.markdown, "News", "Drudge Report front page — grab major news headlines");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "Drudge Report", "News", h.severity);
-  }
-}
-
-// ─── Loop 5: CNN Breaking (X API) ──────────────────────────────────
-
-async function loop5_cnnBreaking(): Promise<void> {
-  const posts = await fetchUserPosts("cnnbrk", 5);
-  const cutoff = Date.now() - 2 * 60 * 60_000; // only posts from last 2 hours
+  const cutoff = Date.now() - 2 * 60 * 60_000; // last 2 hours only
   for (const p of posts) {
     if (seenPostIds.has(p.id)) continue;
     seenPostIds.add(p.id);
@@ -225,120 +253,13 @@ async function loop5_cnnBreaking(): Promise<void> {
     if (text.length < 20) continue;
 
     const headline = text.length > 80 ? text.slice(0, 77) + "..." : text;
-    emitHeadline(headline, "@cnnbrk", "News", "breaking");
+    emitBreaking(`x-${p.id}`, headline, `@${p.authorUsername}`, "News");
   }
-}
 
-// ─── Loop 6: Crypto Prices (Background) ────────────────────────────
-
-async function loop6_cryptoPrices(): Promise<void> {
-  const prices = await fetchCryptoPrices();
-  if (prices.length === 0) return;
-
-  // Store for agent context — no headlines broadcast
-  state.cryptoPrices = prices;
-
-  // But DO broadcast if major move (>5% in 24h)
-  for (const p of prices) {
-    if (Math.abs(p.change24h) >= 5) {
-      const dir = p.change24h > 0 ? "up" : "down";
-      const headline = `${p.symbol} ${dir} ${Math.abs(p.change24h).toFixed(1)}% — $${p.price.toLocaleString()}`;
-      emitHeadline(headline, "CoinGecko", "Crypto", "breaking");
-    }
-  }
-}
-
-// ─── Loop 7: Crypto News (Firecrawl) ───────────────────────────────
-
-async function loop7_cryptoNews(): Promise<void> {
-  const page = await scrapePage("https://www.coingecko.com/en/news");
-  if (!page) return;
-
-  const headlines = await qualityGate(page.markdown, "Crypto", "CoinGecko news page — top crypto stories");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "CoinGecko", "Crypto", h.severity);
-  }
-}
-
-// ─── Loop 8: Finance X Feeds ───────────────────────────────────────
-
-async function loop8_financeX(): Promise<void> {
-  const posts = await fetchMultiUserPosts(
-    ["unusual_whales", "DeItaone", "financialjuice"],
-    5
-  );
-
-  const cutoff = Date.now() - 2 * 60 * 60_000;
-  for (const p of posts) {
-    if (seenPostIds.has(p.id)) continue;
-    seenPostIds.add(p.id);
-
-    if (p.createdAt && new Date(p.createdAt).getTime() < cutoff) continue;
-
-    const text = p.text.replace(/https?:\/\/\S+/g, "").trim();
-    if (text.length < 20) continue;
-
-    const headline = text.length > 80 ? text.slice(0, 77) + "..." : text;
-    emitHeadline(headline, `@${p.authorUsername}`, "Stocks", "breaking");
-  }
-}
-
-// ─── Loops 9-11: Culture (Firecrawl) ───────────────────────────────
-
-async function loop9_cnnCulture(): Promise<void> {
-  const page = await scrapePage("https://www.cnn.com/entertainment");
-  if (!page) return;
-  const headlines = await qualityGate(page.markdown, "Culture", "CNN Entertainment — 1-3 noteworthy headlines");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "CNN", "Culture", h.severity);
-  }
-}
-
-async function loop10_vulture(): Promise<void> {
-  const page = await scrapePage("https://www.vulture.com/");
-  if (!page) return;
-  const headlines = await qualityGate(page.markdown, "Culture", "Vulture — 1-3 noteworthy entertainment headlines");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "Vulture", "Culture", h.severity);
-  }
-}
-
-async function loop11_ew(): Promise<void> {
-  const page = await scrapePage("https://ew.com/");
-  if (!page) return;
-  const headlines = await qualityGate(page.markdown, "Culture", "Entertainment Weekly — 1-3 noteworthy headlines");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "EW", "Culture", h.severity);
-  }
-}
-
-// ─── Loop 12: Weather (Firecrawl) ──────────────────────────────────
-
-async function loop12_weather(): Promise<void> {
-  const page = await scrapePage("https://weather.com/");
-  if (!page) return;
-  const headlines = await qualityGate(page.markdown, "Weather", "Weather.com — only breaking weather events (storms, extremes, disasters)");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "Weather.com", "Weather", h.severity);
-  }
-}
-
-// ─── Loops 13-14: Tech (Firecrawl) ────────────────────────────────
-
-async function loop13_hackernews(): Promise<void> {
-  const page = await scrapePage("https://news.ycombinator.com/");
-  if (!page) return;
-  const headlines = await qualityGate(page.markdown, "Tech", "Hacker News front page — only genuinely breaking tech news, not Show HN or Ask HN");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "Hacker News", "Tech", h.severity);
-  }
-}
-
-async function loop14_techmeme(): Promise<void> {
-  const page = await scrapePage("https://www.techmeme.com/");
-  if (!page) return;
-  const headlines = await qualityGate(page.markdown, "Tech", "Techmeme — top 1-3 breaking tech stories");
-  for (const h of headlines) {
-    emitHeadline(h.headline, "Techmeme", "Tech", h.severity);
+  // Prevent seenPostIds from growing unbounded
+  if (seenPostIds.size > 1000) {
+    const arr = Array.from(seenPostIds);
+    seenPostIds.clear();
+    for (const id of arr.slice(-500)) seenPostIds.add(id);
   }
 }

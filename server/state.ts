@@ -1,5 +1,13 @@
 import type { Building, AgentRole } from "../src/game/config/agents";
 import { ALL_AGENTS } from "../src/game/config/agents";
+import type { BriefingItem } from "./signals/briefing";
+
+// ─── Briefing ───
+
+export interface DailyBriefing {
+  items: BriefingItem[];
+  generatedAt: number;
+}
 
 // ─── News ───
 
@@ -76,6 +84,9 @@ export interface AgentState {
   cooldownUntil: number;
   directive: string | null;       // current action item from conversation
   directiveUntil: number;         // when directive expires
+  // Research results (from newsroom research action)
+  researchResult: string | null;  // cached result from last research, consumed next tick
+  researchQuery: string | null;   // the query that produced the result
   // Context Markets wallet
   walletAddress?: string;
   usdcBalance?: number;
@@ -137,6 +148,24 @@ class ServerState {
     return lines;
   }
 
+  // Daily briefing — cached editorial scan, refreshed every 30 min
+  dailyBriefing: DailyBriefing | null = null;
+
+  // Breaking news dedup — each breaking event fires exactly once
+  private seenBreakingKeys: Set<string> = new Set();
+
+  /** Check if a breaking event has already been emitted. Returns true if NEW. */
+  markBreaking(key: string): boolean {
+    if (this.seenBreakingKeys.has(key)) return false;
+    this.seenBreakingKeys.add(key);
+    // Prevent unbounded growth — clear old keys every 500 entries
+    if (this.seenBreakingKeys.size > 500) {
+      const arr = Array.from(this.seenBreakingKeys);
+      this.seenBreakingKeys = new Set(arr.slice(-200));
+    }
+    return true;
+  }
+
   // Live data from signal loops (used by agent brains for context)
   sportsSlate: Array<{ id: string; league: string; shortName: string; homeTeam: string; awayTeam: string; homeScore: number | null; awayScore: number | null; status: string; statusDetail: string; startTime: string; spread: number | null; overUnder: number | null }> = [];
   liveScores: Array<{ id: string; league: string; shortName: string; homeTeam: string; awayTeam: string; homeScore: number | null; awayScore: number | null; status: string; statusDetail: string; startTime: string }> = [];
@@ -164,6 +193,8 @@ class ServerState {
         cooldownUntil: 0,
         directive: null,
         directiveUntil: 0,
+        researchResult: null,
+        researchQuery: null,
       });
     }
   }

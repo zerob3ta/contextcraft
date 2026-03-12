@@ -175,10 +175,10 @@ export async function runGroupChatTick(): Promise<void> {
   // Process results
   for (const result of results) {
     if (result.status === "fulfilled" && result.value) {
-      const { agent, message, mood, replyTo, conviction } = result.value;
+      const { agent, message, mood, replyTo, building, conviction } = result.value;
 
-      // Add to chat log
-      const chatMsg = addMessage(agent, message, mood, replyTo);
+      // Add to chat log — use pinned building from generation time, not agent.location
+      const chatMsg = addMessage(agent, message, mood, replyTo, building);
 
       // Update mood if changed
       if (mood !== getAgentMood(agent.id)) {
@@ -200,7 +200,7 @@ export async function runGroupChatTick(): Promise<void> {
         checkDirectiveTrigger(agent);
       }
 
-      // Broadcast chat message
+      // Broadcast chat message — use pinned building, not current agent.location
       broadcast({
         type: "chat_message",
         id: chatMsg.id,
@@ -211,7 +211,7 @@ export async function runGroupChatTick(): Promise<void> {
         mood: chatMsg.mood,
         replyTo: chatMsg.replyTo,
         replyPreview: chatMsg.replyTo ? getReplyPreview(chatMsg.replyTo) : null,
-        building: agent.location,
+        building,
       });
 
       state.addSpeech(agent.id, message);
@@ -440,22 +440,28 @@ interface GenerateResult {
   message: string;
   mood: AgentMood;
   replyTo: string | null;
+  building: string; // pinned building at generation time
   conviction: { marketId: string; marketName: string; direction: "bullish" | "bearish"; strength: number } | null;
 }
 
 async function generateMessage(agent: AgentState): Promise<GenerateResult | null> {
+  // Pin the building at the start — agent.location can change mid-generation
+  // if a concurrent runJobAgent moves this agent. Using a pinned value ensures
+  // the attention window, reply validation, and message tag all use the same building.
+  const pinnedBuilding = agent.location;
+
   // Build per-agent attention window: last 8 messages + any mentioning this agent
-  const window = buildAttentionWindow(agent);
+  const window = buildAttentionWindow(agent, pinnedBuilding);
   const marketContext = buildMarketContext();
   const currentMood = getAgentMood(agent.id);
 
-  const buildingName = BUILDING_DISPLAY_NAMES[agent.location] || agent.location;
-  const buildingContext = BUILDING_CHAT_CONTEXT[agent.location] || "";
+  const buildingName = BUILDING_DISPLAY_NAMES[pinnedBuilding] || pinnedBuilding;
+  const buildingContext = BUILDING_CHAT_CONTEXT[pinnedBuilding] || "";
 
   // Target length varies by mood and personality
   const lengthGuide = getLengthGuide(agent, currentMood);
 
-  const isLounge = agent.location === "lounge";
+  const isLounge = pinnedBuilding === "lounge";
 
   const system = isLounge
     ? `You are ${agent.name}, hanging out in the lounge after work.
@@ -524,16 +530,27 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     parts.push(marketContext);
   }
 
-  // News is ONLY available in the newsroom — other buildings get nothing
-  if (agent.location === "newsroom") {
-    const news = state.getRecentNews(8);
-    if (news.length > 0) {
-      parts.push("\nBREAKING NEWS FEED (only visible in the Newsroom — react to these!):");
-      for (const n of news.slice(0, 8)) {
-        const ago = Math.round((Date.now() - n.timestamp) / 60_000);
-        parts.push(`- [${n.category}] ${n.headline} (${ago}min ago)`);
+  // News is ONLY available in the newsroom — the intelligence hub
+  if (pinnedBuilding === "newsroom") {
+    // Daily briefing — wide editorial scan
+    const briefing = state.dailyBriefing;
+    if (briefing && briefing.items.length > 0) {
+      const ago = Math.round((Date.now() - briefing.generatedAt) / 60_000);
+      parts.push(`\nTODAY'S BRIEFING (updated ${ago} min ago — react to these, debate implications!):`);
+      for (const item of briefing.items.slice(0, 15)) {
+        const mTag = item.marketability === "high" ? " ★" : "";
+        parts.push(`- [${item.category}] ${item.headline}${mTag}`);
       }
-      parts.push("You're in the Newsroom — discuss what this news means, debate implications, break stories to the group.");
+    }
+
+    // Breaking alerts (last 30 min only)
+    const recentBreaking = state.getRecentNews(10).filter((n) => Date.now() - n.timestamp < 30 * 60_000);
+    if (recentBreaking.length > 0) {
+      parts.push("\n🚨 BREAKING:");
+      for (const n of recentBreaking.slice(0, 5)) {
+        const ago = Math.round((Date.now() - n.timestamp) / 60_000);
+        parts.push(`- ${n.headline} (${ago}min ago)`);
+      }
     }
 
     // Oracle qualitative summaries for active markets — newsroom gets the intel
@@ -547,13 +564,15 @@ Only include conviction if this conversation genuinely shifted your view on a SP
         parts.push(`- "${shortQ}": ${m.oracleSummary!.slice(0, 100)}${confStr}`);
       }
     }
+
+    parts.push("\nYou're in the Newsroom — discuss what this means, debate implications, suggest market ideas.");
   }
 
   if (window.length > 0) {
     parts.push("\nCHAT HISTORY:");
     for (const msg of window) {
       const replyPrefix = msg.replyTo ? `(replying to ${getReplyAuthor(msg.replyTo)}) ` : "";
-      const bldgTag = msg.building !== agent.location ? ` [from ${BUILDING_DISPLAY_NAMES[msg.building] || msg.building}]` : "";
+      const bldgTag = msg.building !== pinnedBuilding ? ` [from ${BUILDING_DISPLAY_NAMES[msg.building] || msg.building}]` : "";
       parts.push(`[${msg.id}] ${msg.agentName} (${msg.mood})${bldgTag}: ${replyPrefix}"${msg.message}"`);
     }
   } else {
@@ -585,7 +604,7 @@ Only include conviction if this conversation genuinely shifted your view on a SP
 
   // Grounding: inject web search or local facts for newsroom/exchange
   const recentMsgTexts = window.map((m) => m.message);
-  const grounding = await getChatGrounding(agent.location, recentMsgTexts);
+  const grounding = await getChatGrounding(pinnedBuilding, recentMsgTexts);
   if (grounding) {
     parts.push(grounding);
   }
@@ -617,7 +636,7 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     }
 
     // Lounge price filter — hard reject messages with price/spread talk
-    if (agent.location === "lounge" && containsPriceTalk(message)) {
+    if (pinnedBuilding === "lounge" && containsPriceTalk(message)) {
       console.log(`[Chat] ${agent.name}: rejected lounge price talk: "${message.slice(0, 60)}"`);
       return null;
     }
@@ -629,7 +648,7 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     let replyTo: string | null = null;
     if (raw.replyTo) {
       const replyMsg = chatLog.find((m) => m.id === raw.replyTo);
-      if (replyMsg && replyMsg.building === agent.location) {
+      if (replyMsg && replyMsg.building === pinnedBuilding) {
         replyTo = raw.replyTo;
       }
     }
@@ -648,7 +667,7 @@ Only include conviction if this conversation genuinely shifted your view on a SP
       }
     }
 
-    return { agent, message, mood, replyTo, conviction };
+    return { agent, message, mood, replyTo, building: pinnedBuilding, conviction };
   } catch {
     return null;
   }
@@ -728,12 +747,12 @@ function isTooSimilar(newMessage: string, recentMessages: ChatMessage[]): boolea
 
 // ── Attention Window ──
 
-function buildAttentionWindow(agent: AgentState): ChatMessage[] {
+function buildAttentionWindow(agent: AgentState, building: string): ChatMessage[] {
   const window: ChatMessage[] = [];
   const seen = new Set<string>();
 
-  // ONLY show messages from the agent's current building — no cross-room leakage
-  const sameBuilding = chatLog.filter((m) => m.building === agent.location);
+  // ONLY show messages from the pinned building — no cross-room leakage
+  const sameBuilding = chatLog.filter((m) => m.building === building);
   for (const msg of sameBuilding.slice(0, 9)) {
     if (!seen.has(msg.id)) {
       window.push(msg);
@@ -748,7 +767,7 @@ function buildAttentionWindow(agent: AgentState): ChatMessage[] {
 
 // ── Helpers ──
 
-function addMessage(agent: AgentState, message: string, mood: AgentMood, replyTo: string | null): ChatMessage {
+function addMessage(agent: AgentState, message: string, mood: AgentMood, replyTo: string | null, building: string): ChatMessage {
   const msg: ChatMessage = {
     id: `msg-${nextMsgId++}`,
     agentId: agent.id,
@@ -757,7 +776,7 @@ function addMessage(agent: AgentState, message: string, mood: AgentMood, replyTo
     message,
     mood,
     replyTo,
-    building: agent.location,
+    building,
     timestamp: Date.now(),
   };
   chatLog.unshift(msg);

@@ -9,6 +9,7 @@ import { isContextEnabled } from "../context-api/client";
 import { submitMarket, canCreateMarket } from "../context-api/markets";
 import { placePricingOrders, placeTrade, cancelOrders } from "../context-api/trading";
 import { getJobGrounding } from "./grounding";
+import { executeResearch } from "./research";
 import type { AgentMarketDraft } from "../context-api/types";
 import type { AgentState, Market } from "../state";
 
@@ -282,6 +283,22 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       break;
     }
 
+    case "research": {
+      // Only allowed in newsroom
+      if (agent.location !== "newsroom") {
+        state.moveAgent(agentId, "newsroom");
+        broadcast({ type: "agent_move", agentId, destination: "newsroom", reason: "Heading to newsroom to research" });
+      }
+
+      console.log(`[Research] ${agent.name} researching "${action.query}" via ${action.source}`);
+      const result = await executeResearch(action.query, action.source);
+      agent.researchResult = result;
+      agent.researchQuery = action.query;
+      state.addAction(agentId, "researched", `${action.source}: ${action.query.slice(0, 60)}`);
+      state.setAgentCooldown(agentId, 4_000);
+      break;
+    }
+
     case "idle":
       break;
   }
@@ -460,6 +477,8 @@ function describeAction(_agent: AgentState, action: AgentAction): string {
       return `Said: "${action.message.slice(0, 40)}"`;
     case "move":
       return `Moved to ${action.destination}`;
+    case "research":
+      return `Researched: ${action.query.slice(0, 50)} (${action.source})`;
     case "idle":
       return "Observing";
   }

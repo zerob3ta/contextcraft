@@ -13,11 +13,13 @@ const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
 const TOPIC_SEARCH_INTERVAL_MS = 120_000; // 2min — search based on chat topics
 const ORACLE_SYNC_INTERVAL_MS = 90_000; // 90s — oracle + quotes for active markets
+const EXPOSURE_CHECK_INTERVAL_MS = 45_000; // 45s — check resolution status of markets agents have positions in
 
 let balanceSyncTimer: ReturnType<typeof setInterval> | null = null;
 let marketSyncTimer: ReturnType<typeof setInterval> | null = null;
 let topicSearchTimer: ReturnType<typeof setInterval> | null = null;
 let oracleSyncTimer: ReturnType<typeof setInterval> | null = null;
+let exposureCheckTimer: ReturnType<typeof setInterval> | null = null;
 
 // Circuit breaker
 let consecutiveFailures = 0;
@@ -54,11 +56,13 @@ export function startSync(): void {
   setTimeout(() => syncMarkets(), 10_000);
   setTimeout(() => searchChatTopics(), 30_000);
   setTimeout(() => syncOracleData(), 20_000);
+  setTimeout(() => checkExposedMarkets(), 15_000);
 
   balanceSyncTimer = setInterval(syncBalances, BALANCE_SYNC_INTERVAL_MS);
   marketSyncTimer = setInterval(syncMarkets, MARKET_SYNC_INTERVAL_MS);
   topicSearchTimer = setInterval(searchChatTopics, TOPIC_SEARCH_INTERVAL_MS);
   oracleSyncTimer = setInterval(syncOracleData, ORACLE_SYNC_INTERVAL_MS);
+  exposureCheckTimer = setInterval(checkExposedMarkets, EXPOSURE_CHECK_INTERVAL_MS);
 }
 
 export function stopSync(): void {
@@ -66,6 +70,7 @@ export function stopSync(): void {
   if (marketSyncTimer) { clearInterval(marketSyncTimer); marketSyncTimer = null; }
   if (topicSearchTimer) { clearInterval(topicSearchTimer); topicSearchTimer = null; }
   if (oracleSyncTimer) { clearInterval(oracleSyncTimer); oracleSyncTimer = null; }
+  if (exposureCheckTimer) { clearInterval(exposureCheckTimer); exposureCheckTimer = null; }
 }
 
 /**
@@ -114,21 +119,23 @@ async function syncMarkets(): Promise<void> {
   if (!client) return;
 
   try {
-    // Fetch markets with multiple strategies — include pending to catch resolutions
-    const [defaultResult, trendingResult, pendingResult] = await Promise.allSettled([
+    // Fetch markets with multiple strategies — include pending + resolved to catch resolutions
+    const [defaultResult, trendingResult, pendingResult, resolvedResult] = await Promise.allSettled([
       client.markets.list({ status: "active", limit: 30 }),
       client.markets.list({ status: "active", limit: 20, sortBy: "volume" }),
-      client.markets.list({ status: "pending" as "active", limit: 10 }), // cast needed — pending markets resolving
+      client.markets.list({ status: "pending", limit: 10 }),
+      client.markets.list({ status: "resolved", limit: 10 }),
     ]);
 
     const defaultMarkets = defaultResult.status === "fulfilled" ? (defaultResult.value?.markets ?? []) : [];
     const trendingMarkets = trendingResult.status === "fulfilled" ? (trendingResult.value?.markets ?? []) : [];
     const pendingMarkets = pendingResult.status === "fulfilled" ? (pendingResult.value?.markets ?? []) : [];
+    const resolvedMarkets = resolvedResult.status === "fulfilled" ? (resolvedResult.value?.markets ?? []) : [];
 
     // Merge and deduplicate
     const seen = new Set<string>();
     const apiMarkets: typeof defaultMarkets = [];
-    for (const m of [...defaultMarkets, ...trendingMarkets, ...pendingMarkets]) {
+    for (const m of [...defaultMarkets, ...trendingMarkets, ...pendingMarkets, ...resolvedMarkets]) {
       if (!seen.has(m.id)) {
         seen.add(m.id);
         apiMarkets.push(m);
@@ -170,26 +177,28 @@ async function syncMarkets(): Promise<void> {
         if (apiOutcome !== undefined) existing.outcome = apiOutcome;
         if (payoutPcts) existing.payoutPcts = payoutPcts;
 
-        // Detect status transitions and alert agents
+        // Detect status transitions — proposals are BREAKING, resolution is normal
         if (apiStatus && apiStatus !== prevStatus) {
           const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
 
           if (resolutionStatus === "pending" || apiStatus === "pending") {
+            // Oracle PROPOSAL — this is breaking news (fires once per market)
             const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
             const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
-            state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
-            broadcast({ type: "news_alert", headline, source: "Resolution", severity: "breaking", building: "newsroom" });
-            notifyBuildingEvent("newsroom");
-            notifyBuildingEvent("exchange");
-            notifyBuildingEvent("pit");
+            if (state.markBreaking(`proposal-${existing.id}`)) {
+              state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
+              broadcast({ type: "news_alert", headline, source: "Resolution", severity: "breaking", building: "newsroom" });
+              notifyBuildingEvent("newsroom");
+              notifyBuildingEvent("exchange");
+              notifyBuildingEvent("pit");
+            }
           }
 
           if (apiStatus === "resolved" || apiStatus === "closed") {
+            // Resolution finalized — informational, not breaking (agents already know from proposal)
             const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
             const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
             state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
-            broadcast({ type: "news_alert", headline, source: "Resolution", severity: "breaking", building: "newsroom" });
-            notifyBuildingEvent("newsroom");
             notifyBuildingEvent("exchange");
             notifyBuildingEvent("pit");
           }
@@ -261,6 +270,143 @@ async function syncMarkets(): Promise<void> {
   } catch (err) {
     console.error("[Context Sync] Market sync failed:", err);
     recordFailure();
+  }
+}
+
+/**
+ * Position exposure check: individually fetch the status of every market where
+ * agents have positions or open orders. This catches resolution status changes
+ * that the batch list calls miss (e.g., a market that moved from "active" to
+ * "resolved" between list fetches, or one that never appeared in the pending list).
+ *
+ * This is the MOST IMPORTANT sync for agent safety — agents must always know
+ * when a market they're exposed to is resolving.
+ */
+async function checkExposedMarkets(): Promise<void> {
+  if (isCircuitBroken()) return;
+
+  const client = getReadClient();
+  if (!client) return;
+
+  // Collect all API market IDs where agents have positions or open orders
+  const exposedApiIds = new Set<string>();
+  for (const agent of state.agents.values()) {
+    if (agent.positions) {
+      for (const p of agent.positions) {
+        // Position marketId from portfolio API is the API market ID
+        const localMarket = state.markets.get(p.marketId);
+        const apiId = localMarket?.apiMarketId || p.marketId;
+        // Verify this looks like an API ID (not a local M1, M2 ID)
+        if (apiId && !apiId.startsWith("M")) {
+          exposedApiIds.add(apiId);
+        }
+      }
+    }
+    if (agent.openOrders) {
+      for (const o of agent.openOrders) {
+        const localMarket = state.markets.get(o.marketId);
+        const apiId = localMarket?.apiMarketId || o.marketId;
+        if (apiId && !apiId.startsWith("M")) {
+          exposedApiIds.add(apiId);
+        }
+      }
+    }
+  }
+
+  if (exposedApiIds.size === 0) return;
+
+  // Check up to 5 markets per cycle to avoid rate limits
+  const toCheck = Array.from(exposedApiIds).slice(0, 5);
+
+  for (const apiMarketId of toCheck) {
+    try {
+      const m = await client.markets.get(apiMarketId);
+      if (!m) continue;
+
+      const existing = state.getMarketByApiId(apiMarketId);
+      if (!existing) continue;
+
+      const apiStatus = m.status;
+      const resolutionStatus = m.resolutionStatus;
+      const apiOutcome = m.outcome;
+
+      // Always log what we see for exposed markets
+      if (apiStatus !== "active" || (resolutionStatus && resolutionStatus !== "none")) {
+        console.log(`[ExposureCheck] ${existing.id} "${existing.question.slice(0, 40)}" — status=${apiStatus}, resStatus=${resolutionStatus}, outcome=${apiOutcome}`);
+      }
+
+      // Update resolution fields
+      const prevStatus = existing.apiStatus;
+      const prevResStatus = existing.resolutionStatus;
+      if (apiStatus) existing.apiStatus = apiStatus as Market["apiStatus"];
+      if (resolutionStatus) existing.resolutionStatus = resolutionStatus as Market["resolutionStatus"];
+      if (m.proposedAt) existing.proposedAt = new Date(m.proposedAt).getTime();
+      if (m.resolvedAt) existing.resolvedAt = new Date(m.resolvedAt).getTime();
+      if (apiOutcome !== undefined && apiOutcome !== null) existing.outcome = apiOutcome;
+      if (m.payoutPcts) existing.payoutPcts = m.payoutPcts;
+
+      // Detect status transitions and alert
+      if (apiStatus && apiStatus !== prevStatus && prevStatus !== null) {
+        const question = existing.question;
+        const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+
+        if (resolutionStatus === "pending" || apiStatus === "pending") {
+          // Oracle PROPOSAL — breaking, fires once per market
+          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+          const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
+          if (state.markBreaking(`proposal-${existing.id}`)) {
+            state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
+            broadcast({ type: "news_alert", headline, source: "Resolution", severity: "breaking", building: "newsroom" });
+            notifyBuildingEvent("newsroom");
+            notifyBuildingEvent("exchange");
+            notifyBuildingEvent("pit");
+          }
+        }
+
+        if (apiStatus === "resolved" || apiStatus === "closed") {
+          // Resolution finalized — informational, not breaking
+          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+          const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
+          state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
+          notifyBuildingEvent("exchange");
+          notifyBuildingEvent("pit");
+        }
+      }
+
+      // Also detect resolutionStatus transition even without apiStatus change
+      // (market can be status:"active" but resolutionStatus:"pending")
+      if (resolutionStatus === "pending" && prevResStatus !== "pending" && apiStatus === prevStatus) {
+        const shortQ = existing.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+        const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+        const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Cancel orders, close losing positions.`;
+        if (state.markBreaking(`proposal-${existing.id}`)) {
+          state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
+          broadcast({ type: "news_alert", headline, source: "Resolution", severity: "breaking", building: "newsroom" });
+          notifyBuildingEvent("newsroom");
+          notifyBuildingEvent("exchange");
+          notifyBuildingEvent("pit");
+        }
+      }
+
+      // Auto-cancel orders on this market if it's resolving
+      if (apiStatus === "pending" || apiStatus === "resolved" || apiStatus === "closed" ||
+          resolutionStatus === "pending" || resolutionStatus === "resolved") {
+        const { cancelOrders } = await import("./trading");
+        for (const agent of state.agents.values()) {
+          const hasOrders = agent.openOrders?.some((o) =>
+            o.marketId === existing.id || o.marketId === apiMarketId
+          );
+          if (hasOrders) {
+            console.log(`[ExposureCheck] Auto-canceling ${agent.name}'s orders on resolving ${existing.id}`);
+            cancelOrders(agent.id, existing.id).catch(() => {});
+          }
+        }
+      }
+
+      recordSuccess();
+    } catch {
+      recordFailure();
+    }
   }
 }
 
@@ -345,11 +491,14 @@ function detectGameResults(): void {
 
       console.log(`[Sync:GameResult] ${market.id} "${shortQ}" → ${outcomeStr} (${game.shortName} ${scoreStr}, subject=${subjectIsHome ? "home" : "away"}, homeWon=${homeWon})`);
 
-      state.addNews({ headline, snippet: "", source: "Game Result", category: "Markets" });
-      broadcast({ type: "news_alert", headline, source: "Game Result", severity: "breaking", building: "newsroom" });
-      notifyBuildingEvent("newsroom");
-      notifyBuildingEvent("exchange");
-      notifyBuildingEvent("pit");
+      // Fire once per game-market combo
+      if (state.markBreaking(`game-result-${market.id}-${game.id}`)) {
+        state.addNews({ headline, snippet: "", source: "Game Result", category: "Markets" });
+        broadcast({ type: "news_alert", headline, source: "Game Result", severity: "breaking", building: "newsroom" });
+        notifyBuildingEvent("newsroom");
+        notifyBuildingEvent("exchange");
+        notifyBuildingEvent("pit");
+      }
 
       break; // One game per market
     }
@@ -400,15 +549,8 @@ async function syncOracleData(): Promise<void> {
 
         const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
 
-        // Publish oracle update to newsroom when summary changes
-        if (summary && summary !== prevSummary) {
-          const decisionStr = decision ? `${decision} — ` : "";
-          const confStr = confidence ? ` (${confidence} confidence)` : "";
-          const headline = `Oracle on "${shortQ}": ${decisionStr}${summary.slice(0, 100)}${confStr}`;
-          state.addNews({ headline, snippet: summary, source: "Oracle", category: "Markets" });
-          broadcast({ type: "news_alert", headline, source: "Oracle", severity: "normal", building: "newsroom" });
-          notifyBuildingEvent("newsroom");
-        }
+        // Oracle updates are stored on the market object but no longer published as news.
+        // Agents see oracle summaries in their market context (prompts.ts and group-chat.ts newsroom intel).
       }
 
       // Fetch quotes — SDK returns { yes: { bid, ask, last }, no: { bid, ask, last }, spread }
