@@ -70,7 +70,11 @@ export class EventProcessor {
   processEvent(event: GameEvent): void {
     if (!this.scene) return;
 
-    this.externalHandler?.(event);
+    try {
+      this.externalHandler?.(event);
+    } catch (err) {
+      console.warn("[EventProcessor] External handler error:", event.type, err);
+    }
 
     try {
     switch (event.type) {

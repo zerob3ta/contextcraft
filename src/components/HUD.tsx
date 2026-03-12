@@ -206,7 +206,7 @@ function formatAge(arrivedAt: number, now: number): string {
 import type { RealBuilding } from "../game/config/agents";
 
 const BUILDING_NAV: { id: RealBuilding; icon: string; label: string; color: string }[] = [
-  { id: "lounge", icon: "☕", label: "Lounge", color: "#d97706" },
+  { id: "lounge", icon: "🍺", label: "Lounge", color: "#d97706" },
   { id: "newsroom", icon: "📰", label: "Newsroom", color: "#dc2626" },
   { id: "workshop", icon: "🔧", label: "Workshop", color: "#7c3aed" },
   { id: "exchange", icon: "📊", label: "Exchange", color: "#0891b2" },
@@ -225,6 +225,7 @@ function BuildingNav({
   agentDirectives,
   recentBuildingActivity,
   onSelectAgent,
+  npcVisitors,
 }: {
   activeBuilding: RealBuilding | "all";
   onSelectBuilding: (b: RealBuilding | "all") => void;
@@ -233,6 +234,7 @@ function BuildingNav({
   agentDirectives: Record<string, string>;
   recentBuildingActivity: Set<string>;
   onSelectAgent: (agent: AgentConfig) => void;
+  npcVisitors: Record<string, { name: string; color: string }>;
 }) {
   // Count agents per building
   const counts: Record<string, number> = {};
@@ -262,7 +264,8 @@ function BuildingNav({
       <div className="h-px bg-white/5 mx-1 my-0.5" />
 
       {BUILDING_NAV.map((b) => {
-        const count = counts[b.id] || 0;
+        const npcCount = b.id === "lounge" ? Object.keys(npcVisitors).length : 0;
+        const count = (counts[b.id] || 0) + npcCount;
         const isActive = activeBuilding === b.id;
         const hasActivity = recentBuildingActivity.has(b.id);
 
@@ -292,7 +295,7 @@ function BuildingNav({
             </button>
 
             {/* Always show agents in this building */}
-            {count > 0 && (
+            {(count > 0 || (b.id === "lounge" && Object.keys(npcVisitors).length > 0)) && (
               <div className="pl-6 pr-1 pb-1">
                 {agentsAt(b.id).map((agent) => (
                   <button
@@ -314,6 +317,20 @@ function BuildingNav({
                       </span>
                     )}
                   </button>
+                ))}
+                {/* Show NPC visitors in the lounge */}
+                {b.id === "lounge" && Object.entries(npcVisitors).map(([npcId, npc]) => (
+                  <div
+                    key={npcId}
+                    className="flex items-center gap-1.5 w-full px-1 py-0.5"
+                  >
+                    <div
+                      className="w-2 h-2 rounded-full flex-shrink-0 ring-1 ring-white/20"
+                      style={{ backgroundColor: npc.color }}
+                    />
+                    <span className="text-[9px] text-white/40 truncate">{npc.name}</span>
+                    <span className="text-[7px] uppercase text-amber-400/50 ml-auto">visitor</span>
+                  </div>
                 ))}
               </div>
             )}
@@ -759,11 +776,13 @@ function MobileAgentsPanel({
   agentMoods,
   agentDirectives,
   onSelectAgent,
+  npcVisitors,
 }: {
   agentLocations: Record<string, string>;
   agentMoods: Record<string, AgentMood>;
   agentDirectives: Record<string, string>;
   onSelectAgent: (agent: AgentConfig) => void;
+  npcVisitors: Record<string, { name: string; color: string }>;
 }) {
   // Group agents by building
   const byBuilding = new Map<string, AgentConfig[]>();
@@ -838,6 +857,28 @@ function MobileAgentsPanel({
                   </button>
                 );
               })}
+              {/* Show NPC visitors in lounge */}
+              {buildingId === "lounge" && Object.entries(npcVisitors).map(([npcId, npc]) => (
+                <div
+                  key={npcId}
+                  className="flex items-center gap-2.5 w-full px-3 py-2.5 rounded-lg bg-white/[0.02]"
+                >
+                  <div
+                    className="w-8 h-8 rounded-md flex items-center justify-center text-[11px] font-bold text-black/70 flex-shrink-0"
+                    style={{ backgroundColor: npc.color }}
+                  >
+                    {npc.name[0]}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[12px] font-semibold text-[#e2e8f0]">{npc.name}</span>
+                      <span className="text-[8px] uppercase tracking-wide px-1.5 py-0.5 rounded text-amber-400 bg-amber-400/10">
+                        visitor
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         );
@@ -1247,10 +1288,16 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
         }
 
         case "npc_spawn": {
-          setNpcVisitors((prev) => ({
-            ...prev,
-            [event.agentId]: { name: event.name, color: event.color },
-          }));
+          setNpcVisitors((prev) => {
+            // Prevent duplicate NPCs by name (e.g. server restart with new IDs)
+            const existingByName = Object.entries(prev).find(([, v]) => v.name === event.name);
+            if (existingByName) {
+              // Remove old entry, replace with new ID
+              const { [existingByName[0]]: _, ...rest } = prev;
+              return { ...rest, [event.agentId]: { name: event.name, color: event.color } };
+            }
+            return { ...prev, [event.agentId]: { name: event.name, color: event.color } };
+          });
           addChatMessage({
             type: "activity",
             agentId: event.agentId,
@@ -1348,6 +1395,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             agentDirectives={agentDirectives}
             recentBuildingActivity={recentBuildingActivity}
             onSelectAgent={setSelectedAgent}
+            npcVisitors={npcVisitors}
           />
         </div>
 
@@ -1404,6 +1452,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
                 agentMoods={agentMoods}
                 agentDirectives={agentDirectives}
                 onSelectAgent={setSelectedAgent}
+                npcVisitors={npcVisitors}
               />
             </div>
           )}

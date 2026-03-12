@@ -8,6 +8,7 @@ import { state, type Market } from "../state";
 import { broadcast } from "../ws-bridge";
 import { ALL_AGENTS } from "../../src/game/config/agents";
 import { notifyBuildingEvent } from "../agents/group-chat";
+import { sweepStaleOrders } from "./trading";
 
 
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
@@ -15,12 +16,14 @@ const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
 const TOPIC_SEARCH_INTERVAL_MS = 120_000; // 2min — search based on chat topics
 const ORACLE_SYNC_INTERVAL_MS = 90_000; // 90s — oracle + quotes for active markets
 const EXPOSURE_CHECK_INTERVAL_MS = 45_000; // 45s — check resolution status of markets agents have positions in
+const STALE_ORDER_SWEEP_INTERVAL_MS = 120_000; // 2min — cancel orders far from fair value
 
 let balanceSyncTimer: ReturnType<typeof setInterval> | null = null;
 let marketSyncTimer: ReturnType<typeof setInterval> | null = null;
 let topicSearchTimer: ReturnType<typeof setInterval> | null = null;
 let oracleSyncTimer: ReturnType<typeof setInterval> | null = null;
 let exposureCheckTimer: ReturnType<typeof setInterval> | null = null;
+let staleOrderSweepTimer: ReturnType<typeof setInterval> | null = null;
 
 // Circuit breaker
 let consecutiveFailures = 0;
@@ -58,12 +61,14 @@ export function startSync(): void {
   setTimeout(() => searchChatTopics(), 30_000);
   setTimeout(() => syncOracleData(), 20_000);
   setTimeout(() => checkExposedMarkets(), 15_000);
+  setTimeout(() => sweepStaleOrders(), 60_000); // first sweep after 1 min
 
   balanceSyncTimer = setInterval(syncBalances, BALANCE_SYNC_INTERVAL_MS);
   marketSyncTimer = setInterval(syncMarkets, MARKET_SYNC_INTERVAL_MS);
   topicSearchTimer = setInterval(searchChatTopics, TOPIC_SEARCH_INTERVAL_MS);
   oracleSyncTimer = setInterval(syncOracleData, ORACLE_SYNC_INTERVAL_MS);
   exposureCheckTimer = setInterval(checkExposedMarkets, EXPOSURE_CHECK_INTERVAL_MS);
+  staleOrderSweepTimer = setInterval(sweepStaleOrders, STALE_ORDER_SWEEP_INTERVAL_MS);
 }
 
 export function stopSync(): void {
@@ -72,6 +77,7 @@ export function stopSync(): void {
   if (topicSearchTimer) { clearInterval(topicSearchTimer); topicSearchTimer = null; }
   if (oracleSyncTimer) { clearInterval(oracleSyncTimer); oracleSyncTimer = null; }
   if (exposureCheckTimer) { clearInterval(exposureCheckTimer); exposureCheckTimer = null; }
+  if (staleOrderSweepTimer) { clearInterval(staleOrderSweepTimer); staleOrderSweepTimer = null; }
 }
 
 /**
@@ -120,23 +126,25 @@ async function syncMarkets(): Promise<void> {
   if (!client) return;
 
   try {
-    // Fetch markets with multiple strategies — include pending + resolved to catch resolutions
-    const [defaultResult, trendingResult, pendingResult, resolvedResult] = await Promise.allSettled([
-      client.markets.list({ status: "active", limit: 30 }),
-      client.markets.list({ status: "active", limit: 20, sortBy: "volume" }),
-      client.markets.list({ status: "pending", limit: 10 }),
-      client.markets.list({ status: "resolved", limit: 10 }),
+    // Fetch markets with multiple strategies — cast a wide net across the testnet
+    const [defaultResult, trendingResult, recentResult, pendingResult, resolvedResult] = await Promise.allSettled([
+      client.markets.list({ status: "active", limit: 50 }),
+      client.markets.list({ status: "active", limit: 30, sortBy: "volume" }),
+      client.markets.list({ status: "active", limit: 30, sortBy: "new" }),
+      client.markets.list({ status: "pending", limit: 20 }),
+      client.markets.list({ status: "resolved", limit: 20 }),
     ]);
 
     const defaultMarkets = defaultResult.status === "fulfilled" ? (defaultResult.value?.markets ?? []) : [];
     const trendingMarkets = trendingResult.status === "fulfilled" ? (trendingResult.value?.markets ?? []) : [];
+    const recentMarkets = recentResult.status === "fulfilled" ? (recentResult.value?.markets ?? []) : [];
     const pendingMarkets = pendingResult.status === "fulfilled" ? (pendingResult.value?.markets ?? []) : [];
     const resolvedMarkets = resolvedResult.status === "fulfilled" ? (resolvedResult.value?.markets ?? []) : [];
 
     // Merge and deduplicate
     const seen = new Set<string>();
     const apiMarkets: typeof defaultMarkets = [];
-    for (const m of [...defaultMarkets, ...trendingMarkets, ...pendingMarkets, ...resolvedMarkets]) {
+    for (const m of [...defaultMarkets, ...trendingMarkets, ...recentMarkets, ...pendingMarkets, ...resolvedMarkets]) {
       if (!seen.has(m.id)) {
         seen.add(m.id);
         apiMarkets.push(m);
@@ -149,7 +157,7 @@ async function syncMarkets(): Promise<void> {
       const yesPrice = m.outcomePrices?.find((op) => op.outcomeIndex === 0);
       // Debug price data (only when values look wrong — > 1.0 after scaling)
       if (yesPrice?.lastPrice && yesPrice.lastPrice / 1_000_000 > 1.0) {
-        console.log(`[Sync:Price:WARN] "${question.slice(0, 40)}" lastPrice=${yesPrice.lastPrice} → ${yesPrice.lastPrice / 1_000_000} (>1.0!)`);
+        console.log(`[Sync:Price:WARN] "${question.slice(0, 70)}" lastPrice=${yesPrice.lastPrice} → ${yesPrice.lastPrice / 1_000_000} (>1.0!)`);
       }
       // lastPrice is in raw units (PRICE_MULTIPLIER=10000, so 65¢ = 650000): divide by 1M for 0-1
       const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
@@ -182,7 +190,7 @@ async function syncMarkets(): Promise<void> {
 
         // Detect status transitions — proposals are BREAKING, resolution is normal
         if (apiStatus && apiStatus !== prevStatus) {
-          const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+          const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
 
           if (resolutionStatus === "pending" || apiStatus === "pending") {
             // Oracle PROPOSAL — this is breaking news (fires once per market)
@@ -214,7 +222,7 @@ async function syncMarkets(): Promise<void> {
           const delta = Math.abs(newPct - oldPct);
           if (delta >= 3) {
             state.updatePrice(existing.id, fairValue, existing.spread || 0);
-            const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+            const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
             const dir = newPct > oldPct ? "up" : "down";
             const headline = `Market update: "${shortQ}" moved ${dir} to ${newPct}% (was ${oldPct}%)`;
             state.addNews({ headline, snippet: "", source: "Market Data", category: "Markets" });
@@ -342,7 +350,7 @@ async function checkExposedMarkets(): Promise<void> {
 
       // Always log what we see for exposed markets
       if (apiStatus !== "active" || (resolutionStatus && resolutionStatus !== "none")) {
-        console.log(`[ExposureCheck] ${existing.id} "${existing.question.slice(0, 40)}" — status=${apiStatus}, resStatus=${resolutionStatus}, outcome=${apiOutcome}`);
+        console.log(`[ExposureCheck] ${existing.id} "${existing.question.slice(0, 70)}" — status=${apiStatus}, resStatus=${resolutionStatus}, outcome=${apiOutcome}`);
       }
 
       // Update resolution fields
@@ -360,7 +368,7 @@ async function checkExposedMarkets(): Promise<void> {
       // Detect status transitions and alert
       if (apiStatus && apiStatus !== prevStatus && prevStatus !== null) {
         const question = existing.question;
-        const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+        const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
 
         if (resolutionStatus === "pending" || apiStatus === "pending") {
           // Oracle PROPOSAL — breaking, fires once per market
@@ -388,8 +396,8 @@ async function checkExposedMarkets(): Promise<void> {
       // Also detect resolutionStatus transition even without apiStatus change
       // (market can be status:"active" but resolutionStatus:"pending")
       if (resolutionStatus === "pending" && prevResStatus !== "pending" && apiStatus === prevStatus) {
-        const shortQ = existing.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
-        const outcomeStr = inferOutcome(apiOutcome, m.payoutPcts);
+        const shortQ = existing.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
+        const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
         const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Cancel orders, close losing positions.`;
         if (state.markBreaking(`proposal-${existing.id}`)) {
           state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -493,7 +501,7 @@ function detectGameResults(): void {
       market.outcome = outcome;
 
       const outcomeStr = outcome === 0 ? "YES" : "NO";
-      const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+      const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
       const scoreStr = `${game.awayScore}-${game.homeScore}`;
       const headline = `GAME OVER: ${game.shortName} final ${scoreStr}. "${shortQ}" → ${outcomeStr}. Cancel all orders.`;
 
@@ -526,8 +534,10 @@ async function syncOracleData(): Promise<void> {
   const markets = state.getActiveMarkets().filter((m) => m.apiMarketId);
   if (markets.length === 0) return;
 
-  // Process up to 5 markets per cycle to avoid rate limits
-  const batch = markets.slice(0, 5);
+  // Round-robin: process 10 markets per cycle, prioritizing those without oracle data
+  const noOracle = markets.filter((m) => !m.oracleSummary);
+  const stale = markets.filter((m) => m.oracleSummary && (!m.oracleUpdatedAt || Date.now() - m.oracleUpdatedAt > 120_000));
+  const batch = [...noOracle, ...stale, ...markets].slice(0, 10);
 
   for (const market of batch) {
     // Skip if recently updated (within 60s)
@@ -543,7 +553,7 @@ async function syncOracleData(): Promise<void> {
       const oracleData = oracleResult?.oracle;
       if (oracleData) {
         decision = oracleData.summary?.decision || null;
-        summary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary?.slice(0, 200) || null;
+        summary = oracleData.summary?.shortSummary || oracleData.summary?.expandedSummary || null;
         confidence = oracleData.confidenceLevel || null;
       }
 
@@ -555,7 +565,7 @@ async function syncOracleData(): Promise<void> {
         market.oracleDivergence = null;  // no longer tracking divergence
         market.oracleUpdatedAt = Date.now();
 
-        const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+        const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
 
         // Oracle updates are stored on the market object but no longer published as news.
         // Agents see oracle summaries in their market context (prompts.ts and group-chat.ts newsroom intel).
@@ -620,8 +630,8 @@ async function searchChatTopics(): Promise<void> {
 
   if (newTopics.length === 0) return;
 
-  // Search for up to 3 new topics per cycle
-  for (const topic of newTopics.slice(0, 3)) {
+  // Search for up to 5 new topics per cycle
+  for (const topic of newTopics.slice(0, 5)) {
     searchedTopics.add(topic);
     // Auto-expire after TTL
     const timer = setTimeout(() => searchedTopics.delete(topic), SEARCHED_TOPIC_TTL_MS);
@@ -752,7 +762,7 @@ export async function searchMarketsForNews(headline: string): Promise<void> {
       if (localId) {
         newCount++;
         // Add as news-linked market so agents see it
-        state.addMarketNews(localId, `📰 Related to: ${headline.slice(0, 60)}`);
+        state.addMarketNews(localId, `📰 Related to: ${headline.slice(0, 80)}`);
       }
     }
 

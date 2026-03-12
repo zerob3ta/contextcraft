@@ -9,6 +9,7 @@ import { initializeWallets, stopTopupLoop } from "./context-api/setup";
 import { startSync, stopSync } from "./context-api/sync";
 import { startMarketPoller, stopMarketPoller } from "./context-api/markets";
 import { isContextEnabled } from "./context-api/client";
+import { initSleep } from "./sleep";
 
 const WS_PORT = Number(process.env.PORT) || Number(process.env.AGENT_WS_PORT) || 8766;
 
@@ -33,6 +34,9 @@ for (const [key, present] of Object.entries(envStatus)) {
   console.log(`  ${present ? "✓" : "✗"} ${key}`);
 }
 console.log();
+
+// 0. Initialize sleep system — agents start asleep, wake on first connection
+initSleep();
 
 // 1. Start WebSocket server
 startWsServer(WS_PORT);

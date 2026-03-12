@@ -62,31 +62,31 @@ export class DayNightWeather {
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
 
+    // All graphics use default scrollFactor (1) — we position them
+    // at the camera's world position each tick so they always cover
+    // exactly what's visible, regardless of zoom or scroll.
+
     // Stars layer (behind overlay)
     this.starsGfx = scene.add.graphics();
     this.starsGfx.setDepth(4998);
-    this.starsGfx.setScrollFactor(0);
 
     // Moon
     this.moonGfx = scene.add.graphics();
     this.moonGfx.setDepth(4998);
-    this.moonGfx.setScrollFactor(0);
 
     // Rain layer
     this.rainGfx = scene.add.graphics();
     this.rainGfx.setDepth(5001);
-    this.rainGfx.setScrollFactor(0);
 
     // Main tint overlay — covers entire viewport
     this.overlay = scene.add.graphics();
     this.overlay.setDepth(5000);
-    this.overlay.setScrollFactor(0); // stays fixed on screen
 
-    // Generate star positions
+    // Generate star positions (normalized 0-1 so they scale with viewport)
     for (let i = 0; i < 80; i++) {
       this.stars.push({
-        x: Math.random() * 1400,
-        y: Math.random() * 400, // upper portion of sky
+        x: Math.random(),
+        y: Math.random() * 0.45, // upper portion of sky
         size: Math.random() < 0.3 ? 2 : 1,
         twinkleOffset: Math.random() * Math.PI * 2,
       });
@@ -100,7 +100,23 @@ export class DayNightWeather {
     });
   }
 
+  /** Get the camera's visible world rectangle.
+   *  All graphics use default scrollFactor, so we draw in world coords
+   *  at exactly where the camera is looking. */
+  private getViewRect(): { x: number; y: number; w: number; h: number } {
+    const cam = this.scene.cameras.main;
+    const zoom = cam.zoom || 1;
+    const w = cam.width / zoom;
+    const h = cam.height / zoom;
+    // Camera worldView gives the visible world rect
+    const x = cam.worldView.x;
+    const y = cam.worldView.y;
+    return { x, y, w, h };
+  }
+
   private tick(): void {
+    if (!this.scene?.cameras?.main) return;
+
     const elapsed = Date.now() - this.startTime;
     this.gameHour = (10 + elapsed / MS_PER_GAME_HOUR) % 24;
 
@@ -131,35 +147,30 @@ export class DayNightWeather {
   private drawOverlay(): void {
     this.overlay.clear();
 
-    const cam = this.scene.cameras.main;
-    const w = cam.width;
-    const h = cam.height;
+    const { x, y, w, h } = this.getViewRect();
 
     // Time tint
     const timeTint = TIME_TINTS[this.currentTime];
     if (timeTint.alpha > 0) {
-      // Smooth transition: blend based on how far into the period we are
       const alpha = this.getSmoothedAlpha(timeTint.alpha);
       this.overlay.fillStyle(timeTint.color, alpha);
-      this.overlay.fillRect(0, 0, w, h);
+      this.overlay.fillRect(x, y, w, h);
     }
 
     // Weather tint (additive)
     const weatherTint = WEATHER_TINTS[this.currentWeather];
     if (weatherTint.alpha > 0) {
       this.overlay.fillStyle(weatherTint.color, weatherTint.alpha);
-      this.overlay.fillRect(0, 0, w, h);
+      this.overlay.fillRect(x, y, w, h);
     }
   }
 
   private getSmoothedAlpha(targetAlpha: number): number {
-    // Smooth transitions at boundaries
     const h = this.gameHour;
 
     // Dawn transition (5-7): fade from night to dawn to day
     if (h >= DAWN_START && h < DAY_START) {
       const t = (h - DAWN_START) / (DAY_START - DAWN_START);
-      // Blend from night alpha to dawn alpha to 0
       if (t < 0.5) {
         return Phaser.Math.Linear(TIME_TINTS.night.alpha, targetAlpha, t * 2);
       }
@@ -181,9 +192,9 @@ export class DayNightWeather {
   private drawStars(): void {
     this.starsGfx.clear();
 
-    // Only visible at night or dusk
     if (this.currentTime !== "night" && this.currentTime !== "dusk") return;
 
+    const { x, y, w, h } = this.getViewRect();
     const baseAlpha = this.currentTime === "night" ? 0.8 : 0.3;
     const time = Date.now() / 1000;
 
@@ -191,7 +202,7 @@ export class DayNightWeather {
       const twinkle = Math.sin(time * 2 + star.twinkleOffset) * 0.3 + 0.7;
       const alpha = baseAlpha * twinkle;
       this.starsGfx.fillStyle(0xffffff, alpha);
-      this.starsGfx.fillRect(star.x, star.y, star.size, star.size);
+      this.starsGfx.fillRect(x + star.x * w, y + star.y * h, star.size, star.size);
     }
   }
 
@@ -199,11 +210,12 @@ export class DayNightWeather {
     this.moonGfx.clear();
     if (this.currentTime !== "night" && this.currentTime !== "dusk") return;
 
+    const { x, y, w } = this.getViewRect();
     const alpha = this.currentTime === "night" ? 0.9 : 0.4;
 
-    // Crescent moon
-    const mx = 950;
-    const my = 60;
+    // Crescent moon — positioned relative to viewport
+    const mx = x + w * 0.75;
+    const my = y + 60;
 
     // Main circle
     this.moonGfx.fillStyle(0xf5f0c1, alpha);
@@ -223,48 +235,48 @@ export class DayNightWeather {
 
     if (this.currentWeather !== "rain" && this.currentWeather !== "storm") return;
 
-    const cam = this.scene.cameras.main;
-    const w = cam.width;
-    const h = cam.height;
+    const { x, y, w, h } = this.getViewRect();
 
-    // Ensure we have enough rain drops
+    // Ensure we have enough rain drops (stored as 0-1 normalized coords)
     const targetDrops = this.currentWeather === "storm" ? 200 : 100;
     while (this.rainDrops.length < targetDrops) {
       this.rainDrops.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
+        x: Math.random(),
+        y: Math.random(),
         speed: 8 + Math.random() * 6,
         length: 4 + Math.random() * 8,
       });
     }
-    // Remove excess
     while (this.rainDrops.length > targetDrops) {
       this.rainDrops.pop();
     }
 
     const isStorm = this.currentWeather === "storm";
-    const windAngle = isStorm ? 0.3 : 0.1; // slight angle for wind
+    const windAngle = isStorm ? 0.3 : 0.1;
 
     for (const drop of this.rainDrops) {
-      drop.y += drop.speed;
-      drop.x += drop.speed * windAngle;
+      // Animate in normalized space then project to viewport
+      drop.y += drop.speed / h;
+      drop.x += (drop.speed * windAngle) / w;
 
-      // Reset when off screen
-      if (drop.y > h) {
-        drop.y = -drop.length;
-        drop.x = Math.random() * w;
+      if (drop.y > 1) {
+        drop.y = -drop.length / h;
+        drop.x = Math.random();
       }
-      if (drop.x > w) {
+      if (drop.x > 1) {
         drop.x = 0;
       }
+
+      const dx = x + drop.x * w;
+      const dy = y + drop.y * h;
 
       const alpha = isStorm ? 0.4 : 0.25;
       this.rainGfx.lineStyle(1, 0x88aacc, alpha);
       this.rainGfx.lineBetween(
-        drop.x,
-        drop.y,
-        drop.x + drop.length * windAngle,
-        drop.y + drop.length
+        dx,
+        dy,
+        dx + drop.length * windAngle,
+        dy + drop.length
       );
     }
   }
@@ -272,17 +284,12 @@ export class DayNightWeather {
   private drawLightning(): void {
     if (this.currentWeather !== "storm") return;
 
-    // Random lightning flash
-    if (Math.random() < 0.003) { // ~3% chance per tick (100ms)
-      const cam = this.scene.cameras.main;
-      const w = cam.width;
-      const h = cam.height;
+    if (Math.random() < 0.003) {
+      const { x, y, w, h } = this.getViewRect();
 
       // White flash
       this.overlay.fillStyle(0xffffff, 0.3);
-      this.overlay.fillRect(0, 0, w, h);
-
-      // Quick fade — the next tick will redraw normally
+      this.overlay.fillRect(x, y, w, h);
     }
   }
 
@@ -293,7 +300,6 @@ export class DayNightWeather {
     if (newWeather !== this.currentWeather) {
       this.currentWeather = newWeather;
 
-      // Clear rain drops when weather changes to non-rain
       if (newWeather !== "rain" && newWeather !== "storm") {
         this.rainDrops = [];
       }

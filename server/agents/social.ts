@@ -79,7 +79,7 @@ Examples:
     for (const m of markets.slice(0, 4)) {
       const price = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}¢` : "unpriced";
       const trades = m.trades.length;
-      parts.push(`  "${m.question.slice(0, 50)}" — ${price}, ${trades} trades`);
+      parts.push(`  "${m.question.slice(0, 70)}" — ${price}, ${trades} trades`);
     }
   }
 
@@ -123,7 +123,7 @@ export async function runSocialAgent(agentId: string): Promise<void> {
         type: "agent_move",
         agentId,
         destination,
-        reason: message?.slice(0, 40) || "Wandering",
+        reason: message?.slice(0, 70) || "Wandering",
       });
     }
 

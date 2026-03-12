@@ -64,6 +64,9 @@ export class Agent extends Phaser.GameObjects.Container {
   private stateIndicator?: Phaser.GameObjects.Graphics;
   private stateDotTween?: Phaser.Tweens.Tween;
 
+  // Track whether this agent has been destroyed to guard deferred callbacks
+  private isDestroyed = false;
+
   constructor(scene: Phaser.Scene, config: AgentConfig, x: number, y: number) {
     super(scene, x, y);
     this.agentId = config.id;
@@ -230,7 +233,7 @@ export class Agent extends Phaser.GameObjects.Container {
   }
 
   startIdle(): void {
-    if (this.isMoving || this.idleTween) return;
+    if (this.isDestroyed || this.isMoving || this.idleTween) return;
     this.idleTween = this.scene.tweens.add({
       targets: this,
       y: this.baseY - 2,
@@ -267,6 +270,7 @@ export class Agent extends Phaser.GameObjects.Container {
     let currentIdx = 0;
 
     const moveToNext = () => {
+      if (this.isDestroyed) return;
       if (currentIdx >= targets.length) {
         this.isMoving = false;
         this.baseY = this.y;
@@ -288,12 +292,13 @@ export class Agent extends Phaser.GameObjects.Container {
         duration: Math.max(duration, 100),
         ease: "Linear",
         onUpdate: () => {
-          // Walking bounce — character bobs up and down
+          if (this.isDestroyed) return;
           const progress = this.walkTween?.progress ?? 0;
           const bounce = Math.abs(Math.sin(progress * Math.PI * 6)) * 3;
           this.sprite.setPosition(0, -bounce);
         },
         onComplete: () => {
+          if (this.isDestroyed) return;
           this.sprite.setPosition(0, 0);
           currentIdx++;
           moveToNext();
@@ -305,16 +310,19 @@ export class Agent extends Phaser.GameObjects.Container {
   }
 
   showSpeech(text: string, emotion: Emotion): void {
+    if (this.isDestroyed) return;
     const bubbleY = this.y - this.spriteHeight / 2 - 12;
     this.bubbleManager.show(this.x, bubbleY, text, emotion, this.convoColor);
   }
 
   showSpeechOffset(text: string, emotion: Emotion, offsetX: number): void {
+    if (this.isDestroyed) return;
     const bubbleY = this.y - this.spriteHeight / 2 - 12;
     this.bubbleManager.show(this.x + offsetX, bubbleY, text, emotion, this.convoColor);
   }
 
   showTradeEffect(): void {
+    if (this.isDestroyed) return;
     const particles = this.scene.add.graphics();
     particles.setDepth(200);
 
@@ -372,6 +380,7 @@ export class Agent extends Phaser.GameObjects.Container {
   }
 
   setDirective(directive: string): void {
+    if (this.isDestroyed) return;
     if (!directive) {
       if (this.directiveLabel.alpha > 0) {
         this.scene.tweens.add({
@@ -382,7 +391,6 @@ export class Agent extends Phaser.GameObjects.Container {
       }
       return;
     }
-    // Truncate for display
     const display = directive.length > 35 ? directive.slice(0, 33) + "..." : directive;
     this.directiveLabel.setText(`→ ${display}`);
     this.scene.tweens.add({
@@ -393,6 +401,8 @@ export class Agent extends Phaser.GameObjects.Container {
   }
 
   showActionToast(result: string): void {
+    if (this.isDestroyed) return;
+
     const ROLE_COLORS: Record<string, number> = {
       creator: 0xa78bfa,
       pricer: 0x22d3ee,
@@ -401,7 +411,6 @@ export class Agent extends Phaser.GameObjects.Container {
 
     const roleColor = ROLE_COLORS[this.config.role] || 0x94a3b8;
 
-    // Create a distinct action toast — no tail, dark bg, role-colored accent
     const container = this.scene.add.container(this.x, this.y - this.spriteHeight / 2 - 16);
     container.setDepth(1001);
     container.setAlpha(0);
@@ -424,13 +433,10 @@ export class Agent extends Phaser.GameObjects.Container {
     label.setPosition(accentW / 2, -(padY));
 
     const bg = this.scene.add.graphics();
-    // Dark background
     bg.fillStyle(0x1e293b, 0.95);
     bg.fillRoundedRect(-w / 2, -(h), w, h, 4);
-    // Border
     bg.lineStyle(1, roleColor, 0.4);
     bg.strokeRoundedRect(-w / 2, -(h), w, h, 4);
-    // Role-colored left accent
     bg.fillStyle(roleColor, 0.9);
     bg.fillRoundedRect(-w / 2, -(h), accentW, h, { tl: 4, bl: 4, tr: 0, br: 0 });
 
@@ -438,7 +444,6 @@ export class Agent extends Phaser.GameObjects.Container {
     container.add(label);
     this.scene.add.existing(container);
 
-    // Fade in
     this.scene.tweens.add({
       targets: container,
       alpha: 1,
@@ -447,9 +452,11 @@ export class Agent extends Phaser.GameObjects.Container {
       ease: "Back.easeOut",
     });
 
-    // Fade out after 8s
-    this.scene.time.delayedCall(8000, () => {
-      this.scene.tweens.add({
+    // Fade out after 8s — container is a standalone scene object, safe even if agent is destroyed
+    const sceneRef = this.scene;
+    sceneRef.time.delayedCall(8000, () => {
+      if (!sceneRef?.tweens) return;
+      sceneRef.tweens.add({
         targets: container,
         alpha: 0,
         y: container.y - 12,
@@ -463,22 +470,19 @@ export class Agent extends Phaser.GameObjects.Container {
   // ── Mood System ──────────────────────────────────────────
 
   setMood(mood: AgentMood): void {
+    if (this.isDestroyed) return;
     if (mood === this.currentMood) return;
-    const oldMood = this.currentMood;
     this.currentMood = mood;
 
-    // Update glow ring
     this.updateMoodGlow(mood);
-
-    // Update thought bubble (emoji)
     this.updateMoodBubble(mood);
 
-    // Flash the name label in mood color briefly
     if (mood !== "neutral") {
       const glowColor = MOOD_GLOW[mood];
       const hex = `#${glowColor.toString(16).padStart(6, "0")}`;
       this.nameLabel.setColor(hex);
       this.scene.time.delayedCall(3000, () => {
+        if (this.isDestroyed) return;
         if (this.currentMood === mood) {
           this.nameLabel.setColor(this.convoColor
             ? `#${this.convoColor.toString(16).padStart(6, "0")}`
@@ -500,26 +504,23 @@ export class Agent extends Phaser.GameObjects.Container {
     }
 
     if (mood === "neutral") return;
+    if (this.isDestroyed) return;
 
     const glow = this.scene.add.graphics();
     const glowColor = MOOD_GLOW[mood];
     const size = this.spriteHeight;
 
-    // Soft glow ellipse beneath the character
     glow.fillStyle(glowColor, 0.15);
     glow.fillEllipse(0, (size / 2) + 4, size * 1.2, 8);
-
-    // Subtle ring around character
     glow.lineStyle(1, glowColor, 0.3);
     glow.strokeEllipse(0, 0, size * 0.8, size * 1.1);
 
     this.add(glow);
     this.moodGlow = glow;
-    // Send to back of container so it's behind sprite
     this.sendToBack(glow);
 
-    // Auto-fade after 15s (moods decay)
     this.scene.time.delayedCall(15000, () => {
+      if (this.isDestroyed) return;
       if (this.moodGlow === glow) {
         this.scene.tweens.add({
           targets: glow,
@@ -535,7 +536,6 @@ export class Agent extends Phaser.GameObjects.Container {
   }
 
   private updateMoodBubble(mood: AgentMood): void {
-    // Remove existing bubble
     if (this.moodBubble) {
       if (this.moodBubbleTween) {
         this.moodBubbleTween.stop();
@@ -546,18 +546,17 @@ export class Agent extends Phaser.GameObjects.Container {
     }
 
     const emoji = MOOD_EMOJI[mood];
-    if (!emoji) return; // neutral = no bubble
+    if (!emoji) return;
+    if (this.isDestroyed) return;
 
     const bubbleY = -this.spriteHeight / 2 - 20;
 
     const container = this.scene.add.container(0, bubbleY);
     container.setDepth(150);
 
-    // Tiny thought bubble background
     const bg = this.scene.add.graphics();
     bg.fillStyle(0xffffff, 0.85);
     bg.fillRoundedRect(-10, -8, 20, 16, 6);
-    // Small thought dots
     bg.fillStyle(0xffffff, 0.6);
     bg.fillCircle(-4, 10, 2);
     bg.fillCircle(-2, 14, 1.5);
@@ -572,7 +571,6 @@ export class Agent extends Phaser.GameObjects.Container {
     this.add(container);
     container.setAlpha(0);
 
-    // Pop in
     this.scene.tweens.add({
       targets: container,
       alpha: 1,
@@ -581,7 +579,6 @@ export class Agent extends Phaser.GameObjects.Container {
       ease: "Back.easeOut",
     });
 
-    // Gentle float
     this.moodBubbleTween = this.scene.tweens.add({
       targets: container,
       y: bubbleY - 7,
@@ -593,8 +590,8 @@ export class Agent extends Phaser.GameObjects.Container {
 
     this.moodBubble = container;
 
-    // Fade out after 10s
     this.scene.time.delayedCall(10000, () => {
+      if (this.isDestroyed) return;
       if (this.moodBubble === container) {
         this.scene.tweens.add({
           targets: container,
@@ -616,6 +613,7 @@ export class Agent extends Phaser.GameObjects.Container {
   // ── State Indicator ─────────────────────────────────────
 
   setAgentState(state: AgentState): void {
+    if (this.isDestroyed) return;
     const changed = state !== this.agentState;
     this.agentState = state;
     if (changed) {
@@ -703,5 +701,40 @@ export class Agent extends Phaser.GameObjects.Container {
 
   getPosition(): { x: number; y: number } {
     return { x: this.x, y: this.y };
+  }
+
+  /** Clean up ALL tweens and timers before destroying to prevent orphaned callbacks */
+  destroy(fromScene?: boolean): void {
+    this.isDestroyed = true;
+    if (this.walkTween) {
+      this.walkTween.stop();
+      this.walkTween = undefined;
+    }
+    if (this.idleTween) {
+      this.idleTween.stop();
+      this.idleTween = undefined;
+    }
+    if (this.moodBubbleTween) {
+      this.moodBubbleTween.stop();
+      this.moodBubbleTween = undefined;
+    }
+    if (this.stateDotTween) {
+      this.stateDotTween.stop();
+      this.stateDotTween = undefined;
+    }
+    if (this.moodBubble) {
+      this.moodBubble.destroy();
+      this.moodBubble = undefined;
+    }
+    if (this.moodGlow) {
+      this.moodGlow.destroy();
+      this.moodGlow = undefined;
+    }
+    if (this.stateIndicator) {
+      this.stateIndicator.destroy();
+      this.stateIndicator = undefined;
+    }
+    this.isMoving = false;
+    super.destroy(fromScene);
   }
 }

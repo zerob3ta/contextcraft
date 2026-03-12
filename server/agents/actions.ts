@@ -68,7 +68,7 @@ export function validateAction(raw: unknown, role: AgentRole): AgentAction {
     }
 
     case "cancel_orders": {
-      if (role !== "trader") return { action: "idle" };
+      if (role !== "trader" && role !== "pricer") return { action: "idle" };
       const marketId = String(obj.marketId || "");
       if (!marketId) return { action: "idle" };
       return { action: "cancel_orders", marketId };

@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
+import { notifyConnect, notifyDisconnect } from "./sleep";
 
 export type AgentMood = "bullish" | "bearish" | "uncertain" | "confident" | "scared" | "manic" | "neutral";
 
@@ -30,7 +31,9 @@ export function startWsServer(port: number): WebSocketServer {
   wss = new WebSocketServer({ port, host: "0.0.0.0" });
 
   wss.on("connection", (ws) => {
-    console.log(`[WS] Client connected (total: ${wss!.clients.size})`);
+    const count = wss!.clients.size;
+    console.log(`[WS] Client connected (total: ${count})`);
+    notifyConnect(count);
 
     // Send welcome event (normal severity so it doesn't trigger breaking banner)
     const welcome: GameEvent = {
@@ -42,7 +45,9 @@ export function startWsServer(port: number): WebSocketServer {
     ws.send(JSON.stringify(welcome));
 
     ws.on("close", () => {
-      console.log(`[WS] Client disconnected (total: ${wss!.clients.size})`);
+      const remaining = wss!.clients.size;
+      console.log(`[WS] Client disconnected (total: ${remaining})`);
+      notifyDisconnect(remaining);
     });
   });
 

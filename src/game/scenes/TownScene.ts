@@ -464,6 +464,8 @@ export class TownScene extends Phaser.Scene {
     const fullPath = [...pathPoints, finalSlot];
 
     agent.walkTo(fullPath, () => {
+      // Guard: agent may have been despawned during walk
+      if (!this.agents.has(agentId)) return;
       this.agentLocations.set(agentId, destination);
       // Set working state when arriving at a work building
       if (destination !== "lounge" && !destination.startsWith("path_")) {
@@ -472,8 +474,6 @@ export class TownScene extends Phaser.Scene {
         agent.setAgentState("idle");
       }
     });
-
-    this.agentLocations.set(agentId, destination);
   }
 
   showSpeechBubble(agentId: string, text: string, emotion: Emotion): void {
@@ -529,6 +529,7 @@ export class TownScene extends Phaser.Scene {
 
     // Slide out after 5s
     this.time.delayedCall(5000, () => {
+      if (!this.tweens) return;
       this.tweens.add({
         targets: container,
         y: -50,
@@ -685,10 +686,12 @@ export class TownScene extends Phaser.Scene {
     if (existing) existing.destroy();
 
     this.chattingTimers.set(agentId, this.time.delayedCall(10000, () => {
+      this.chattingTimers.delete(agentId);
+      // Guard: agent may have been despawned
+      if (!this.agents.has(agentId)) return;
       if (agent.getAgentState() === "chatting") {
         agent.setAgentState("idle");
       }
-      this.chattingTimers.delete(agentId);
     }));
   }
 
@@ -697,6 +700,14 @@ export class TownScene extends Phaser.Scene {
   /** Spawn a temporary NPC — walks in from off-screen to the lounge */
   spawnNPC(config: AgentConfig): void {
     if (this.agents.has(config.id)) return; // already exists
+
+    // Prevent duplicate NPCs by name (e.g. after server restart with new IDs)
+    for (const [, existing] of this.agents) {
+      if (existing.config.name === config.name && existing.config.id.startsWith("npc_")) {
+        console.warn(`[TownScene] NPC "${config.name}" already in scene as ${existing.config.id}, skipping ${config.id}`);
+        return;
+      }
+    }
 
     // Start off-screen left
     const startX = -40;
@@ -719,11 +730,20 @@ export class TownScene extends Phaser.Scene {
     const currentBuilding = this.agentLocations.get(agentId) ?? "lounge";
     this.releaseSlot(agentId, currentBuilding);
 
+    // Clear any chatting timer for this NPC
+    const chattingTimer = this.chattingTimers.get(agentId);
+    if (chattingTimer) {
+      chattingTimer.destroy();
+      this.chattingTimers.delete(agentId);
+    }
+
     // Walk off-screen right
     const exitX = 1150;
     const exitY = 400 + Math.random() * 100;
 
     agent.walkTo([{ x: exitX, y: exitY }], () => {
+      // Guard: agent may already have been cleaned up
+      if (!this.agents.has(agentId)) return;
       agent.destroy();
       this.agents.delete(agentId);
       this.agentLocations.delete(agentId);

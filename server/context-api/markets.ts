@@ -88,7 +88,7 @@ export async function submitMarket(
       return null;
     }
 
-    console.log(`[Context Markets] Submitted: ${questionForDisplay.slice(0, 60)} (${data.submissionId})`);
+    console.log(`[Context Markets] Submitted: ${questionForDisplay.slice(0, 80)} (${data.submissionId})`);
 
     // Track pending creation
     pendingCreations.push({
@@ -155,7 +155,7 @@ async function pollPendingCreations(): Promise<void> {
       const pollAny = data as unknown as Record<string, unknown>;
       if (pollAny.refuseToResolve) {
         const reason = String(pollAny.rejectionReason || pollAny.qualityExplanation || "Unknown rejection");
-        console.log(`[Context Markets] Rejected: ${pending.question.slice(0, 60)} — ${reason}`);
+        console.log(`[Context Markets] Rejected: ${pending.question.slice(0, 80)} — ${reason}`);
         expired.push(i);
 
         // Broadcast rejection with reason so LLM can learn
@@ -220,7 +220,7 @@ async function finalizeMarketCreation(
   url?: string,
 ): Promise<void> {
   marketsCreatedToday++;
-  console.log(`[Context Markets] Created! ${pending.question.slice(0, 60)} → ${apiMarketId} (${marketsCreatedToday}/${DAILY_LIMIT} today)`);
+  console.log(`[Context Markets] Created! ${pending.question.slice(0, 80)} → ${apiMarketId} (${marketsCreatedToday}/${DAILY_LIMIT} today)`);
 
   // Add to local state with dual IDs
   const market = state.createMarketWithApiId(pending.question, pending.agentId, apiMarketId);
@@ -238,7 +238,7 @@ async function finalizeMarketCreation(
   notifyBuildingEvent("workshop");
   notifyBuildingEvent("exchange");
 
-  state.addAction(pending.agentId, "created market", pending.question.slice(0, 60));
+  state.addAction(pending.agentId, "created market", pending.question.slice(0, 80));
 }
 
 function broadcastCreationRejected(agentId: string, question: string, reason: string): void {

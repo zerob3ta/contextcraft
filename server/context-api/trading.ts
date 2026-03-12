@@ -7,9 +7,48 @@
 
 import { getAgentClient } from "./client";
 import { state } from "../state";
+import type { AgentState } from "../state";
 import { broadcast } from "../ws-bridge";
 import { notifyBuildingEvent } from "../agents/group-chat";
 import { isApiHealthy } from "./sync";
+
+/**
+ * Estimate total account value for an agent (buying power + position value).
+ * Used to derive proportional position sizes.
+ */
+function getAccountValue(agent: AgentState): number {
+  const balance = agent.usdcBalance ?? 0;
+
+  let positionValue = 0;
+  if (agent.positions) {
+    for (const p of agent.positions) {
+      const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
+      if (m && m.fairValue !== null) {
+        const isYes = p.outcome.toLowerCase().includes("yes");
+        const mid = isYes ? m.fairValue : (1 - m.fairValue);
+        positionValue += p.size * mid;
+      } else {
+        // No price — assume 50¢
+        positionValue += p.size * 0.5;
+      }
+    }
+  }
+
+  return balance + positionValue;
+}
+
+/**
+ * Compute a position size as a percentage of account value.
+ * pctOfAccount: e.g. 0.02 = 2% of account per order
+ * priceCents: price of the contract in cents (used to convert $ to contracts)
+ * Returns contract count, clamped to [min, max].
+ */
+function sizeFromAccount(agent: AgentState, pctOfAccount: number, priceCents: number, min = 5, max = 500): number {
+  const accountVal = getAccountValue(agent);
+  const dollarRisk = accountVal * pctOfAccount;
+  const contracts = Math.floor((dollarRisk / priceCents) * 100);
+  return Math.max(min, Math.min(max, contracts));
+}
 
 /**
  * Cancel all open orders for an agent on a specific market.
@@ -47,6 +86,78 @@ export async function cancelOrders(agentId: string, localMarketId: string): Prom
   } catch (err) {
     console.error(`[Trading] ${agentId}: cancel failed on ${localMarketId}:`, err);
     return false;
+  }
+}
+
+/**
+ * Sweep stale orders for ALL pricers/traders.
+ * Cancels open orders whose price is far from current fair value (>15¢ off)
+ * or on markets that have been inactive (no trades in >10 min).
+ * Runs periodically from the sync loop — no LLM needed.
+ */
+const STALE_PRICE_THRESHOLD_CENTS = 15; // cancel if order price >15¢ from fair value
+const STALE_MARKET_INACTIVITY_MS = 10 * 60_000; // 10 min with no trades
+
+export async function sweepStaleOrders(): Promise<void> {
+  if (!isApiHealthy()) return;
+
+  const agents = Array.from(state.agents.values()).filter(
+    (a) => (a.role === "pricer" || a.role === "trader") && a.openOrders && a.openOrders.length > 0
+  );
+
+  for (const agent of agents) {
+    const ordersToCancel = new Map<string, string[]>(); // localMarketId → reasons
+
+    for (const order of agent.openOrders || []) {
+      const market = state.markets.get(order.marketId);
+      if (!market || !market.apiMarketId) continue;
+
+      // Skip resolving markets — forceResolveCleanup handles those
+      if (market.resolutionStatus === "pending" || market.resolutionStatus === "resolved" ||
+          market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed") {
+        continue;
+      }
+
+      let shouldCancel = false;
+      let reason = "";
+
+      // Check price staleness: is the order price far from current fair value?
+      if (market.fairValue !== null) {
+        const fairCents = Math.round(market.fairValue * 100);
+        // For YES side orders, compare directly. For NO side, the fair value is (100 - fairCents).
+        // Since we track orders with a generic "price" field, compare to whichever is closer.
+        const distFromYes = Math.abs(order.price - fairCents);
+        const distFromNo = Math.abs(order.price - (100 - fairCents));
+        const minDist = Math.min(distFromYes, distFromNo);
+
+        if (minDist > STALE_PRICE_THRESHOLD_CENTS) {
+          shouldCancel = true;
+          reason = `price ${order.price}¢ is ${minDist}¢ from fair value`;
+        }
+      }
+
+      // Check market inactivity
+      if (!shouldCancel) {
+        const lastTrade = market.trades[market.trades.length - 1];
+        const lastActivity = lastTrade?.ts ?? 0;
+        if (Date.now() - lastActivity > STALE_MARKET_INACTIVITY_MS && market.fairValue === null) {
+          shouldCancel = true;
+          reason = "market has no fair value and no recent activity";
+        }
+      }
+
+      if (shouldCancel) {
+        const existing = ordersToCancel.get(order.marketId) || [];
+        existing.push(reason);
+        ordersToCancel.set(order.marketId, existing);
+      }
+    }
+
+    // Cancel stale orders market by market
+    for (const [localMarketId, reasons] of ordersToCancel) {
+      console.log(`[StaleOrderSweep] ${agent.name}: cancelling orders on ${localMarketId} — ${reasons[0]}`);
+      await cancelOrders(agent.id, localMarketId).catch(() => {});
+    }
   }
 }
 
@@ -92,7 +203,7 @@ export async function placePricingOrders(
   const noBid = Math.max(1, (100 - fairValueCents) - halfSpread);
   const noAsk = Math.min(99, (100 - fairValueCents) + Math.ceil(spreadCents / 2));
 
-  // Inventory-aware sizing
+  // Dynamic sizing: ~2% of account value per side, with inventory skew
   let yesInventory = 0;
   let noInventory = 0;
   if (agent.positions) {
@@ -104,11 +215,15 @@ export async function placePricingOrders(
     }
   }
 
-  const baseSize = 10;
-  const yesBidSize = Math.max(5, baseSize - Math.min(5, Math.floor(yesInventory / 10)));
-  const yesAskSize = Math.max(5, baseSize + Math.min(5, Math.floor(yesInventory / 10)));
-  const noBidSize = Math.max(5, baseSize - Math.min(5, Math.floor(noInventory / 10)));
-  const noAskSize = Math.max(5, baseSize + Math.min(5, Math.floor(noInventory / 10)));
+  const baseSize = sizeFromAccount(agent, 0.02, fairValueCents, 5, 200);
+  // Skew: reduce bids on side we're long, increase asks to offload
+  const invSkew = Math.min(Math.floor(baseSize * 0.4), 50);
+  const yesSkew = yesInventory > 0 ? Math.min(invSkew, Math.floor(yesInventory / 5)) : 0;
+  const noSkew = noInventory > 0 ? Math.min(invSkew, Math.floor(noInventory / 5)) : 0;
+  const yesBidSize = Math.max(5, baseSize - yesSkew);
+  const yesAskSize = Math.max(5, baseSize + yesSkew);
+  const noBidSize = Math.max(5, baseSize - noSkew);
+  const noAskSize = Math.max(5, baseSize + noSkew);
 
   try {
     // Get all open order nonces for atomic cancel
@@ -267,7 +382,9 @@ export async function placeTrade(
       return false;
     }
 
-    const sellSize = Math.min(size, Math.floor(position.size), 100);
+    // Dynamic sell cap: up to 5% of account value in contracts, or the full position
+    const maxSellContracts = sizeFromAccount(agent, 0.05, 50, 5, 500);
+    const sellSize = Math.min(size, Math.floor(position.size), maxSellContracts);
     if (sellSize < 1) return false;
 
     // Simulate sell to get realistic price
@@ -323,7 +440,7 @@ export async function placeTrade(
       });
       notifyBuildingEvent("pit");
 
-      const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
+      const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
       state.addAction(agentId, `sold ${side}`, `$${proceeds} on ${shortQ}`);
 
       return true;
@@ -370,9 +487,10 @@ export async function placeTrade(
     }
   }
 
-  // Clamp size to affordable amount
+  // Dynamic buy cap: ~3% of account value, clamped to what we can afford
+  const maxBuyContracts = sizeFromAccount(agent, 0.03, priceCents, 5, 500);
   const maxAffordable = Math.floor((balance / priceCents) * 100);
-  size = Math.min(size, maxAffordable, 100);
+  size = Math.min(size, maxAffordable, maxBuyContracts);
   if (size < 1) {
     console.log(`[Trading] ${agentId}: can't afford any contracts at ${priceCents}¢`);
     return false;
@@ -405,7 +523,7 @@ export async function placeTrade(
     });
     notifyBuildingEvent("pit");
 
-    const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
+    const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
     state.addAction(agentId, `bought ${side}`, `$${cost} on ${shortQ}`);
 
     return true;

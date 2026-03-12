@@ -103,7 +103,7 @@ function emitBreaking(key: string, headline: string, source: string, category: s
   if (Math.random() < 0.5) {
     const agents = Array.from(state.agents.values());
     const reactor = agents[Math.floor(Math.random() * agents.length)];
-    const shortHL = headline.length > 40 ? headline.slice(0, 37) + "..." : headline;
+    const shortHL = headline.length > 70 ? headline.slice(0, 67) + "..." : headline;
     const reactions = [
       `Whoa — ${shortHL}`,
       `Did you see this?! ${shortHL}`,
@@ -115,7 +115,7 @@ function emitBreaking(key: string, headline: string, source: string, category: s
       broadcast({
         type: "agent_speak",
         agentId: reactor.id,
-        message: msg.slice(0, 90),
+        message: msg.slice(0, 140),
         emotion: "excited",
         building: reactor.location,
       });
@@ -252,7 +252,7 @@ async function checkBreakingX(): Promise<void> {
     const text = p.text.replace(/https?:\/\/\S+/g, "").trim();
     if (text.length < 20) continue;
 
-    const headline = text.length > 80 ? text.slice(0, 77) + "..." : text;
+    const headline = text.length > 140 ? text.slice(0, 137) + "..." : text;
     emitBreaking(`x-${p.id}`, headline, `@${p.authorUsername}`, "News");
   }
 

@@ -2,7 +2,7 @@ import { state } from "../state";
 import { isNPC } from "./npcs";
 import { broadcast } from "../ws-bridge";
 import { callMinimax, parseJsonAction } from "./brain";
-import { buildSystemPrompt, buildUserPrompt } from "./prompts";
+import { buildSystemPrompt, buildUserPrompt, buildPortfolioReviewSystemPrompt, buildPortfolioReviewPrompt } from "./prompts";
 import { validateAction, clampTradeSize, type AgentAction } from "./actions";
 import { draftMarket, type MarketDraft } from "../market/creator";
 import { runGroupChatTick, notifyBuildingEvent } from "./group-chat";
@@ -11,14 +11,17 @@ import { submitMarket, canCreateMarket } from "../context-api/markets";
 import { placePricingOrders, placeTrade, cancelOrders } from "../context-api/trading";
 import { getJobGrounding } from "./grounding";
 import { executeResearch } from "./research";
+import { isAgentAwake, isScramblePhase } from "../sleep";
 import type { AgentMarketDraft } from "../context-api/types";
 import type { AgentState, Market } from "../state";
 
-const TICK_INTERVAL_MS = 8_000; // unified tick every 8s
+const TICK_INTERVAL_MS = 14_000; // unified tick every 14s (was 8s — reduced for cost)
 const JOB_AGENTS_PER_ROLE = 1; // 1 agent per role on job duty
 const MARKET_CREATION_MIN_INTERVAL = 600_000; // 10min global cooldown between market creations
+const PORTFOLIO_REVIEW_EVERY_N_TICKS = 4; // every 4th tick, pricers/traders review their book
 
 let tickInterval: ReturnType<typeof setInterval> | null = null;
+let tickCount = 0;
 
 export function startScheduler(): void {
   console.log("[Scheduler] Starting unified scheduler (job + social, 8s ticks)...");
@@ -36,7 +39,11 @@ export function stopScheduler(): void {
 }
 
 async function runTick(): Promise<void> {
+  // Skip everything if agents are sleeping (no viewers)
+  if (!isAgentAwake()) return;
+
   const now = Date.now();
+  tickCount++;
   const agents = Array.from(state.agents.values());
 
   // Pre-tick: force cancel orders for agents with open orders on resolving markets
@@ -61,8 +68,13 @@ async function runTick(): Promise<void> {
   if (pricers.length > 0) jobAgents.push(shuffle(pricers)[0]);
   if (traders.length > 0) jobAgents.push(shuffle(traders)[0]);
 
-  // Skip creator job duty if market was created recently (global cooldown) or daily limit reached
+  // Skip job agents when there's nothing actionable — saves LLM calls
   const now2 = Date.now();
+  const activeMarkets = state.getActiveMarkets();
+  const hasActiveMarkets = activeMarkets.length > 0;
+  const hasUnpricedMarkets = activeMarkets.some((m) => m.fairValue === null && m.apiMarketId);
+  const hasRecentNews = state.getRecentNews(3).some((n) => now2 - n.timestamp < 15 * 60_000);
+
   const filteredJobAgents = jobAgents.filter((a) => {
     if (a.role === "creator") {
       if (now2 - state.lastMarketCreatedAt < MARKET_CREATION_MIN_INTERVAL) {
@@ -72,15 +84,54 @@ async function runTick(): Promise<void> {
         return false; // daily API limit reached
       }
     }
+    // Skip pricer if no active markets to price (unless they have a directive)
+    if (a.role === "pricer" && !hasActiveMarkets && !a.directive) {
+      return false;
+    }
+    // Skip trader if no priced markets to trade AND no recent news to react to
+    if (a.role === "trader" && !hasActiveMarkets && !hasRecentNews && !a.directive) {
+      return false;
+    }
+    // On odd ticks, skip pricer/trader if all markets are already priced and no breaking news
+    // This halves their frequency when things are calm
+    if (tickCount % 2 === 1 && !a.directive) {
+      if (a.role === "pricer" && !hasUnpricedMarkets && !hasRecentNews) return false;
+      if (a.role === "trader" && !hasRecentNews) return false;
+    }
     return true;
   });
 
-  const jobNames = filteredJobAgents.map((a) => `${a.name}[job]`);
-  console.log(`[Tick] ${jobNames.join(", ")} + conversations`);
+  // Portfolio review: every Nth tick, one pricer and one trader review their book
+  // During scramble phase (wake-up), ALL pricers/traders review simultaneously
+  const reviewAgents: AgentState[] = [];
+  const scramble = isScramblePhase();
+  if (scramble && isContextEnabled()) {
+    // Scramble: every pricer and trader reviews their book
+    const jobIds = new Set(filteredJobAgents.map((a) => a.id));
+    for (const a of [...pricers, ...traders]) {
+      if (!jobIds.has(a.id)) reviewAgents.push(a);
+    }
+    if (reviewAgents.length > 0) {
+      console.log(`[Tick] SCRAMBLE — ${reviewAgents.length} agents reviewing positions`);
+    }
+  } else if (tickCount % PORTFOLIO_REVIEW_EVERY_N_TICKS === 0 && isContextEnabled()) {
+    // Normal: pick one pricer + one trader NOT already on normal job duty
+    const jobIds = new Set(filteredJobAgents.map((a) => a.id));
+    const reviewPricers = pricers.filter((a) => !jobIds.has(a.id) && !onDirective.has(a.id));
+    const reviewTraders = traders.filter((a) => !jobIds.has(a.id) && !onDirective.has(a.id));
+    if (reviewPricers.length > 0) reviewAgents.push(shuffle(reviewPricers)[0]);
+    if (reviewTraders.length > 0) reviewAgents.push(shuffle(reviewTraders)[0]);
+  }
 
-  // Run job agents + conversation system concurrently
+  const jobNames = filteredJobAgents.map((a) => `${a.name}[job]`);
+  const reviewNames = reviewAgents.map((a) => `${a.name}[review]`);
+  const allNames = [...jobNames, ...reviewNames];
+  console.log(`[Tick] ${allNames.join(", ")} + conversations`);
+
+  // Run job agents + portfolio reviews + conversation system concurrently
   await Promise.allSettled([
     ...filteredJobAgents.map((a) => runJobAgent(a.id)),
+    ...reviewAgents.map((a) => runPortfolioReview(a.id)),
     runGroupChatTick(),
   ]);
 }
@@ -135,6 +186,40 @@ async function runJobAgent(agentId: string): Promise<void> {
     }
   } catch (err) {
     console.error(`[Scheduler] Agent ${agentId} error:`, err);
+  }
+}
+
+// ─── Portfolio review (periodic book review for pricers/traders) ──
+
+async function runPortfolioReview(agentId: string): Promise<void> {
+  const agent = state.agents.get(agentId);
+  if (!agent) return;
+
+  // Skip if no positions and no open orders — nothing to review
+  const hasPositions = agent.positions && agent.positions.length > 0 && agent.positions.some((p) => p.size > 0);
+  const hasOrders = agent.openOrders && agent.openOrders.length > 0;
+  if (!hasPositions && !hasOrders) {
+    console.log(`[Review:${agent.name}] No positions or orders to review — skipping`);
+    return;
+  }
+
+  try {
+    const systemPrompt = buildPortfolioReviewSystemPrompt(agent);
+    const userPrompt = buildPortfolioReviewPrompt(agent);
+
+    const response = await callMinimax(systemPrompt, userPrompt);
+    const raw = parseJsonAction(response);
+    const action = validateAction(raw, agent.role);
+
+    console.log(`[Review:${agent.name}] ${JSON.stringify(action)}`);
+
+    if (action.action !== "idle") {
+      await processAction(agentId, action);
+      agent.lastActionAt = Date.now();
+      state.setAgentCooldown(agentId, 6_000);
+    }
+  } catch (err) {
+    console.error(`[Review:${agent.name}] Error:`, err);
   }
 }
 
@@ -201,7 +286,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
 
       // Log to social context so other agents can react
       const cents = Math.round(action.fairValue * 100);
-      const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
+      const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
       state.addAction(agentId, "priced", `${shortQ} at ${cents}¢`);
       state.setAgentCooldown(agentId, 8_000);
 
@@ -248,7 +333,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
             price: Math.round(price * 100) / 100, building: "pit", question: market.question,
           });
           notifyBuildingEvent("pit");
-          const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
+          const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
           state.addAction(agentId, `${dir === "sell" ? "sold" : "bought"} ${action.side}`, `$${cost} on ${shortQ}`);
         }
       } else {
@@ -264,7 +349,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
           price: Math.round(price * 100) / 100, building: "pit", question: market.question,
         });
         notifyBuildingEvent("pit");
-        const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40);
+        const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
         state.addAction(agentId, `${dir === "sell" ? "sold" : "bought"} ${action.side}`, `$${cost} on ${shortQ}`);
       }
 
@@ -280,7 +365,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       if (isContextEnabled() && market.apiMarketId) {
         await cancelOrders(agentId, action.marketId);
       }
-      state.addAction(agentId, "cancelled orders", market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 40));
+      state.addAction(agentId, "cancelled orders", market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70));
       break;
     }
 
@@ -295,7 +380,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       const result = await executeResearch(action.query, action.source);
       agent.researchResult = result;
       agent.researchQuery = action.query;
-      state.addAction(agentId, "researched", `${action.source}: ${action.query.slice(0, 60)}`);
+      state.addAction(agentId, "researched", `${action.source}: ${action.query.slice(0, 80)}`);
       state.setAgentCooldown(agentId, 4_000);
       break;
     }
@@ -331,7 +416,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
   const question = typeof result === "string" ? result : result.question;
 
   if (state.isDuplicateMarket(question)) {
-    console.log(`[Creator:${agent.name}] Duplicate market: ${question.slice(0, 60)}`);
+    console.log(`[Creator:${agent.name}] Duplicate market: ${question.slice(0, 80)}`);
     state.setAgentCooldown(agentId, 10_000);
     returnToLounge(agentId, 10_000);
     return;
@@ -362,7 +447,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
     // Non-blocking submit — goes to background poller
     const submissionId = await submitMarket(agentId, draft, question);
     if (submissionId) {
-      console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 60)} (${endTimeHours}h, ${draft.evidenceMode})`);
+      console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 80)} (${endTimeHours}h, ${draft.evidenceMode})`);
       const market = state.createMarket(question, agentId);
       state.lastMarketCreatedAt = Date.now();
       broadcast({
@@ -374,7 +459,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
       });
       notifyBuildingEvent("workshop");
       notifyBuildingEvent("exchange");
-      state.addAction(agentId, "submitted market", question.slice(0, 60));
+      state.addAction(agentId, "submitted market", question.slice(0, 80));
       announceNewMarket(agentId, question);
     } else {
       console.log(`[Creator:${agent.name}] Context API submit failed, falling back to local`);
@@ -383,7 +468,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
       broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId, building: "workshop" });
       notifyBuildingEvent("workshop");
       notifyBuildingEvent("exchange");
-      state.addAction(agentId, "created market", question.slice(0, 60));
+      state.addAction(agentId, "created market", question.slice(0, 80));
       announceNewMarket(agentId, question);
     }
   } else {
@@ -393,7 +478,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
     broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId, building: "workshop" });
     notifyBuildingEvent("workshop");
     notifyBuildingEvent("exchange");
-    state.addAction(agentId, "created market", question.slice(0, 60));
+    state.addAction(agentId, "created market", question.slice(0, 80));
     announceNewMarket(agentId, question);
   }
 
@@ -444,7 +529,7 @@ function inferSources(question: string, topic: string): string[] {
  */
 function announceNewMarket(agentId: string, question: string): void {
   const agentName = state.agents.get(agentId)?.name || agentId;
-  const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
+  const shortQ = question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 80);
   const headline = `New market: "${shortQ}" — created by ${agentName}. Pricers: needs fair value. Traders: watch for entry.`;
   state.addNews({ headline, snippet: question, source: "Context Markets", category: "Markets" });
   broadcast({ type: "news_alert", headline, source: "Context Markets", severity: "normal", building: "newsroom" });
@@ -455,13 +540,13 @@ function announceNewMarket(agentId: string, question: string): void {
 
 function shortTitle(question: string): string {
   let q = question.replace(/^Will\s+/i, "").replace(/\?$/, "");
-  return q.length > 30 ? q.slice(0, 28) + ".." : q;
+  return q.length > 70 ? q.slice(0, 67) + "..." : q;
 }
 
 function describeAction(_agent: AgentState, action: AgentAction): string {
   switch (action.action) {
     case "create_market":
-      return `Created market: ${action.topic.slice(0, 50)}`;
+      return `Created market: ${action.topic.slice(0, 80)}`;
     case "post_price": {
       const m = state.markets.get(action.marketId);
       return `Priced "${shortTitle(m?.question || "market")}" at ${Math.round(action.fairValue * 100)}¢`;
@@ -475,11 +560,11 @@ function describeAction(_agent: AgentState, action: AgentAction): string {
       return `Cancelled orders on "${shortTitle(m?.question || "market")}"`;
     }
     case "speak":
-      return `Said: "${action.message.slice(0, 40)}"`;
+      return `Said: "${action.message.slice(0, 90)}"`;
     case "move":
       return `Moved to ${action.destination}`;
     case "research":
-      return `Researched: ${action.query.slice(0, 50)} (${action.source})`;
+      return `Researched: ${action.query.slice(0, 80)} (${action.source})`;
     case "idle":
       return "Observing";
   }
@@ -538,7 +623,7 @@ function forceResolveCleanup(): void {
             continue;
           }
           sellAttempts.set(attemptKey, attempts + 1);
-          const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 40);
+          const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
           agent.directive = `SELL your losing ${pos.outcome.toUpperCase()} position on "${shortQ}" [${m.id}] — market resolving ${outcomeStr}`;
           agent.directiveUntil = Date.now() + 30_000;
           console.log(`[Scheduler:ForceCleanup] ${agent.name} DIRECTIVE: sell losing position on ${m.id} (attempt ${attempts + 1}/${MAX_SELL_ATTEMPTS})`);

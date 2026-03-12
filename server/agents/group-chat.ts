@@ -12,6 +12,7 @@ import type { Building } from "../../src/game/config/agents";
 import type { AgentState } from "../state";
 import { getChatGrounding } from "./grounding";
 import { tickNPCs, isNPC } from "./npcs";
+import { isAgentAwake } from "../sleep";
 
 // ── Types ──
 
@@ -39,15 +40,15 @@ export interface Conviction {
 
 // ── Constants ──
 
-const SPEAKERS_PER_TICK = 3;
+const SPEAKERS_PER_TICK = 2;
 const MAX_CHAT_LOG = 100;
 const CONVICTION_DIRECTIVE_THRESHOLD = 60;
 const CONVICTION_DECAY_PER_TICK = 3;
 const MOOD_DECAY_TICKS = 15; // extreme moods decay after 15 ticks without reinforcement
 // Prompt target: what we ASK the LLM to aim for (via prompt instructions)
 // Render limit: hard cap on what we'll actually send to the frontend (never truncate mid-thought)
-const PROMPT_TARGET_LENGTH = 100; // chars — what we tell the LLM to aim for
-const RENDER_MAX_LENGTH = 200;    // chars — hard cap, but we never truncate below this
+const PROMPT_TARGET_LENGTH = 140; // chars — what we tell the LLM to aim for
+const RENDER_MAX_LENGTH = 350;    // chars — hard cap, but we never truncate below this
 
 // Where each role goes to fulfill directives
 const ROLE_WORK_BUILDINGS: Record<string, Building> = {
@@ -131,6 +132,9 @@ export function getAgentConvictions(agentId: string): Conviction[] {
  * broadcasts messages, checks for conviction-driven directives.
  */
 export async function runGroupChatTick(): Promise<void> {
+  // Skip chat when agents are sleeping (no viewers)
+  if (!isAgentAwake()) return;
+
   tickCount++;
 
   // Decay convictions
@@ -514,10 +518,15 @@ async function generateMessage(agent: AgentState): Promise<GenerateResult | null
 
   const isLounge = pinnedBuilding === "lounge";
 
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+  });
+
   const system = isLounge
     ? `You are ${agent.name}, hanging out in the lounge after work.
 PERSONALITY: ${agent.personality}
 CURRENT VIBE: ${currentMood === "bullish" ? "good mood" : currentMood === "bearish" ? "grumpy" : currentMood === "manic" ? "hyped" : currentMood === "scared" ? "anxious" : currentMood === "confident" ? "chill" : currentMood}
+TODAY: ${today}
 LOCATION: ${buildingName}
 
 ${buildingContext}
@@ -542,6 +551,7 @@ Respond with JSON:
 PERSONALITY: ${agent.personality}
 SPECIALTY: ${agent.specialty}
 CURRENT MOOD: ${currentMood}
+TODAY: ${today}
 LOCATION: ${buildingName}
 
 ${buildingContext}
@@ -563,7 +573,8 @@ RULES:
 - Reference agents by name. Be direct.
 - No emojis. Casual but sharp.
 - ONLY reference markets that appear in the ACTIVE MARKETS list below. Do NOT invent or hallucinate market names.
-- If a market is marked RESOLVING, it is DONE. The oracle proposal is final — it WILL resolve that way. Do not discuss it as if the outcome is uncertain. Do not suggest trading it. Acknowledge it's over and move on.
+- Prices shown are the YES price (probability the event happens). YES 65¢ means 65% chance it happens, NO costs 35¢.
+- If a market is marked RESOLVING, it is DONE. The oracle proposal is final — it WILL resolve that way. "YES (it happened)" = event occurred, "NO (didn't happen)" = it didn't. Do not discuss it as if the outcome is uncertain. Do not suggest trading it. Acknowledge it's over and move on.
 - If replying, include their message ID in replyTo.
 
 Respond with JSON:
@@ -582,6 +593,16 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     parts.push(marketContext);
   }
 
+  // Inject brief position summary for pricers/traders (they need to know their exposure in chat)
+  if (!isLounge && (agent.role === "pricer" || agent.role === "trader") && agent.positions && agent.positions.length > 0) {
+    const posLines = agent.positions.slice(0, 5).map((p) => {
+      const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
+      const label = m ? shortMarketTitle(m.question) : p.marketId;
+      return `${p.outcome.toUpperCase()} ${Math.round(p.size)}x "${label}" @${Math.round(p.avgPrice * 100)}¢`;
+    });
+    parts.push(`\nYOUR POSITIONS: ${posLines.join(" | ")}`);
+  }
+
   // If NPCs are present in the lounge, tell the agent about them
   if (isLounge) {
     const { getActiveNPCStates } = require("./npcs");
@@ -592,7 +613,19 @@ Only include conviction if this conversation genuinely shifted your view on a SP
     }
   }
 
-  // News is ONLY available in the newsroom — the intelligence hub
+  // Breaking news available in all work buildings (agents hear about breaking events)
+  if (!isLounge) {
+    const recentBreaking = state.getRecentNews(10).filter((n) => Date.now() - n.timestamp < 30 * 60_000);
+    if (recentBreaking.length > 0) {
+      parts.push("\n🚨 BREAKING:");
+      for (const n of recentBreaking.slice(0, 5)) {
+        const ago = Math.round((Date.now() - n.timestamp) / 60_000);
+        parts.push(`- ${n.headline} (${ago}min ago)`);
+      }
+    }
+  }
+
+  // Full briefing and oracle intel — the newsroom is the intelligence hub
   if (pinnedBuilding === "newsroom") {
     // Daily briefing — wide editorial scan
     const briefing = state.dailyBriefing;
@@ -602,28 +635,6 @@ Only include conviction if this conversation genuinely shifted your view on a SP
       for (const item of briefing.items.slice(0, 15)) {
         const mTag = item.marketability === "high" ? " ★" : "";
         parts.push(`- [${item.category}] ${item.headline}${mTag}`);
-      }
-    }
-
-    // Breaking alerts (last 30 min only)
-    const recentBreaking = state.getRecentNews(10).filter((n) => Date.now() - n.timestamp < 30 * 60_000);
-    if (recentBreaking.length > 0) {
-      parts.push("\n🚨 BREAKING:");
-      for (const n of recentBreaking.slice(0, 5)) {
-        const ago = Math.round((Date.now() - n.timestamp) / 60_000);
-        parts.push(`- ${n.headline} (${ago}min ago)`);
-      }
-    }
-
-    // Oracle qualitative summaries for active markets — newsroom gets the intel
-    const markets = state.getActiveMarkets();
-    const withOracle = markets.filter((m) => m.oracleSummary);
-    if (withOracle.length > 0) {
-      parts.push("\nORACLE INTEL (qualitative takes from one AI model — not gospel):");
-      for (const m of withOracle.slice(0, 5)) {
-        const shortQ = shortMarketTitle(m.question);
-        const confStr = m.oracleConfidence ? ` (${m.oracleConfidence})` : "";
-        parts.push(`- "${shortQ}": ${m.oracleSummary!.slice(0, 100)}${confStr}`);
       }
     }
 
@@ -914,7 +925,7 @@ function checkDirectiveTrigger(agent: AgentState): void {
       type: "agent_move",
       agentId: agent.id,
       destination: workBuilding,
-      reason: directive.slice(0, 40),
+      reason: directive.slice(0, 80),
     });
   }
 
@@ -959,21 +970,32 @@ function buildMarketContext(): string {
   const parts: string[] = [];
 
   if (resolving.length > 0) {
-    const lines = resolving.slice(0, 3).map((m) => {
-      const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : "?";
+    parts.push("🚨 RESOLVING MARKETS (these are DONE — do NOT suggest trading):");
+    for (const m of resolving.slice(0, 5)) {
+      const outcomeStr = m.outcome === 0 ? "YES (it happened)" : m.outcome === 1 ? "NO (didn't happen)" : "?";
       const title = shortMarketTitle(m.question);
-      return `"${title}" → RESOLVING ${outcomeStr}`;
-    });
-    parts.push(`🚨 RESOLVING (do NOT trade these): ${lines.join(" | ")}`);
+      parts.push(`  - "${title}" → ${outcomeStr}`);
+    }
   }
 
   if (active.length > 0) {
-    const lines = active.slice(0, 5).map((m) => {
-      const price = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}%` : "unpriced";
+    parts.push("ACTIVE MARKETS:");
+    for (const m of active.slice(0, 8)) {
+      const price = m.fairValue !== null ? `YES ${Math.round(m.fairValue * 100)}¢` : "unpriced";
       const title = shortMarketTitle(m.question);
-      return `"${title}" (${price})`;
-    });
-    parts.push(`ACTIVE MARKETS: ${lines.join(" | ")}`);
+      // Deadline countdown
+      let deadlineTag = "";
+      if (m.deadline) {
+        const remainingMs = new Date(m.deadline).getTime() - Date.now();
+        if (remainingMs <= 0) deadlineTag = " ⏰EXPIRED";
+        else if (remainingMs < 3600_000) deadlineTag = ` ⏰${Math.round(remainingMs / 60_000)}min left`;
+        else if (remainingMs < 86400_000) deadlineTag = ` ⏰${Math.round(remainingMs / 3600_000)}h left`;
+        else deadlineTag = ` ⏰${Math.round(remainingMs / 86400_000)}d left`;
+      }
+      // Oracle one-liner
+      const oracleTag = m.oracleSummary ? ` — oracle: ${m.oracleSummary}` : "";
+      parts.push(`  - "${title}" (${price}${deadlineTag})${oracleTag}`);
+    }
   }
 
   return parts.join("\n");
@@ -981,14 +1003,14 @@ function buildMarketContext(): string {
 
 function shortMarketTitle(question: string): string {
   let q = question.replace(/^Will\s+/i, "").replace(/\?$/, "");
-  if (q.length > 35) q = q.slice(0, 33) + "..";
+  if (q.length > 70) q = q.slice(0, 67) + "...";
   return q;
 }
 
 function getReplyPreview(msgId: string): string | null {
   const msg = chatLog.find((m) => m.id === msgId);
   if (!msg) return null;
-  const preview = msg.message.length > 50 ? msg.message.slice(0, 47) + "..." : msg.message;
+  const preview = msg.message.length > 80 ? msg.message.slice(0, 77) + "..." : msg.message;
   return `${msg.agentName}: ${preview}`;
 }
 

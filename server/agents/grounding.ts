@@ -69,8 +69,8 @@ export async function getChatGrounding(
   agentLocation: string,
   recentMessages: string[],
 ): Promise<string> {
-  // Only ground when in newsroom or exchange (where facts matter)
-  if (agentLocation !== "newsroom" && agentLocation !== "exchange") return "";
+  // Only ground when in newsroom, exchange, or pit (where facts matter)
+  if (agentLocation !== "newsroom" && agentLocation !== "exchange" && agentLocation !== "pit") return "";
 
   // Extract a searchable topic from recent messages
   const combined = recentMessages.join(" ");
@@ -148,9 +148,9 @@ function getLocalContext(topic: string, marketQuestion?: string): string | null 
   if (withOracle.length > 0) {
     parts.push("ORACLE NOTES (qualitative — one model's take, not gospel):");
     for (const m of withOracle.slice(0, 5)) {
-      const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50);
+      const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
       const confStr = m.oracleConfidence ? ` (${m.oracleConfidence})` : "";
-      parts.push(`  "${shortQ}" — ${m.oracleSummary!.slice(0, 100)}${confStr}`);
+      parts.push(`  "${shortQ}" — ${m.oracleSummary}${confStr}`);
     }
   }
 
