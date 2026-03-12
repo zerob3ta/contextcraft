@@ -15,6 +15,9 @@ export type GameEvent =
   | { type: "building_selected"; buildingId: string }
   | { type: "agent_directive"; agentId: string; directive: string }
   | { type: "directive_fulfilled"; agentId: string; agentName: string; directive: string; result: string; building?: string }
+  // NPC visitor events
+  | { type: "npc_spawn"; agentId: string; name: string; color: string; accentColor: string; personality: string; backstory: string; spriteFeatures: { hat?: string; glasses?: boolean; size: "small" | "medium" | "large"; hairStyle?: string } }
+  | { type: "npc_despawn"; agentId: string }
   // Context Markets integration events
   | { type: "market_rejected"; agentId: string; question: string; reason: string; building?: string }
   | { type: "market_failed"; agentId: string; question: string; reason: string; building?: string }

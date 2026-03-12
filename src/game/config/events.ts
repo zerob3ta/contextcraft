@@ -96,6 +96,26 @@ export type GameEvent =
       result: string;
       building?: string;
     }
+  // NPC visitor events
+  | {
+      type: "npc_spawn";
+      agentId: string;
+      name: string;
+      color: string;
+      accentColor: string;
+      personality: string;
+      backstory: string;
+      spriteFeatures: {
+        hat?: string;
+        glasses?: boolean;
+        size: "small" | "medium" | "large";
+        hairStyle?: string;
+      };
+    }
+  | {
+      type: "npc_despawn";
+      agentId: string;
+    }
   // Context Markets integration events
   | {
       type: "market_rejected";

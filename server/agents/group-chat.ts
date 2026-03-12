@@ -11,6 +11,7 @@ import { callMinimax, parseJsonAction } from "./brain";
 import type { Building } from "../../src/game/config/agents";
 import type { AgentState } from "../state";
 import { getChatGrounding } from "./grounding";
+import { tickNPCs, isNPC } from "./npcs";
 
 // ── Types ──
 
@@ -117,6 +118,9 @@ export async function runGroupChatTick(): Promise<void> {
       }
     }
   }
+
+  // Tick NPC visitors (track stay duration, despawn expired)
+  tickNPCs();
 
   // Decay extreme moods toward neutral
   for (const [agentId, moodState] of agentMoods) {

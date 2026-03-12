@@ -4,6 +4,7 @@ config(); // also load .env if present
 import { startWsServer } from "./ws-bridge";
 import { startPoller, stopPoller } from "./signals/poller";
 import { startScheduler, stopScheduler } from "./agents/scheduler";
+import { startNPCSpawner, stopNPCSpawner } from "./agents/npcs";
 import { initializeWallets, stopTopupLoop } from "./context-api/setup";
 import { startSync, stopSync } from "./context-api/sync";
 import { startMarketPoller, stopMarketPoller } from "./context-api/markets";
@@ -63,6 +64,9 @@ if (envStatus.MINIMAX_API_KEY) {
   console.warn("[Scheduler] Skipping — no MINIMAX_API_KEY");
 }
 
+// 5. Start NPC visitor spawner
+startNPCSpawner();
+
 console.log("\n[Server] All systems go. Press Ctrl+C to stop.\n");
 
 // Graceful shutdown
@@ -70,6 +74,7 @@ process.on("SIGINT", () => {
   console.log("\n[Server] Shutting down...");
   stopPoller();
   stopScheduler();
+  stopNPCSpawner();
   stopSync();
   stopMarketPoller();
   stopTopupLoop();
@@ -79,6 +84,7 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   stopPoller();
   stopScheduler();
+  stopNPCSpawner();
   stopSync();
   stopMarketPoller();
   stopTopupLoop();

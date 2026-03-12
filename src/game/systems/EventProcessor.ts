@@ -113,6 +113,24 @@ export class EventProcessor {
         // Handled by HUD only — no Phaser action needed
         break;
 
+      case "npc_spawn":
+        this.scene.spawnNPC({
+          id: event.agentId,
+          name: event.name,
+          role: "trader", // NPCs display as visitors
+          color: event.color,
+          accentColor: event.accentColor,
+          personality: event.personality,
+          specialty: "Visiting",
+          moveSpeed: 50 + Math.random() * 40,
+          spriteFeatures: event.spriteFeatures,
+        });
+        break;
+
+      case "npc_despawn":
+        this.scene.despawnNPC(event.agentId);
+        break;
+
       case "market_rejected":
       case "market_failed":
       case "markets_synced":

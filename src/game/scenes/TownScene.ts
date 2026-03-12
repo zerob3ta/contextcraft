@@ -1,9 +1,10 @@
 import Phaser from "phaser";
-import { ALL_AGENTS, type Building, type RealBuilding, type Emotion } from "../config/agents";
+import { ALL_AGENTS, type Building, type RealBuilding, type Emotion, type AgentConfig } from "../config/agents";
 import type { AgentMood } from "../config/events";
 import { BUILDINGS, BUILDING_LIST, type BuildingConfig } from "../config/buildings";
 import { Agent } from "../entities/Agent";
 import { findPath, getPathSegments, getBuildingEntrance } from "../systems/Pathfinding";
+import { DayNightWeather } from "../systems/DayNightWeather";
 
 export class TownScene extends Phaser.Scene {
   private agents = new Map<string, Agent>();
@@ -14,6 +15,8 @@ export class TownScene extends Phaser.Scene {
   private activeBubbleAgents = new Map<string, { x: number; y: number; expireAt: number }>();
   private buildingSelectHandler?: (buildingId: string) => void;
   private selectedBuildingHighlight?: Phaser.GameObjects.Graphics;
+  private dayNight!: DayNightWeather;
+  private windowGfx?: Phaser.GameObjects.Graphics;
 
   constructor() {
     super({ key: "TownScene" });
@@ -27,6 +30,7 @@ export class TownScene extends Phaser.Scene {
     this.spawnAgents();
     this.addBuildingAnimations();
     this.setupCamera();
+    this.dayNight = new DayNightWeather(this);
   }
 
   // ── Camera (pan + zoom) ────────────────────────────────────
@@ -313,22 +317,38 @@ export class TownScene extends Phaser.Scene {
   }
 
   private addBuildingAnimations(): void {
-    // Blink random windows
-    const windowGfx = this.add.graphics();
-    windowGfx.setDepth(12);
+    // Blink random windows — glow adapts to time of day
+    this.windowGfx = this.add.graphics();
+    this.windowGfx.setDepth(12);
 
     this.time.addEvent({
       delay: 2000,
       loop: true,
       callback: () => {
-        windowGfx.clear();
-        // Randomly brighten a couple windows across buildings
+        if (!this.windowGfx) return;
+        this.windowGfx.clear();
+
+        const timeOfDay = this.dayNight?.getTimeOfDay() ?? "day";
+        // More windows glow at night, brighter too
+        const glowChance = timeOfDay === "night" ? 0.85 : timeOfDay === "dusk" ? 0.7 : timeOfDay === "dawn" ? 0.6 : 0.4;
+        const glowAlpha = timeOfDay === "night" ? 1.0 : timeOfDay === "dusk" ? 0.9 : 0.7;
+        const glowColor = timeOfDay === "night" ? 0xfef08a : 0xfef9c3;
+
         for (const building of BUILDING_LIST) {
-          if (Math.random() > 0.5) {
-            const wx = building.x + 20 + Math.floor(Math.random() * 3) * ((building.width - 40) / 3);
-            const wy = building.y + 20 + Math.floor(Math.random() * 2) * 30;
-            windowGfx.fillStyle(0xfef9c3, 0.9);
-            windowGfx.fillRect(wx, wy, 12, 12);
+          const winStartX = building.x + 20;
+          const winSpacingX = (building.width - 40) / 3;
+          for (let row = 0; row < 2; row++) {
+            for (let col = 0; col < 3; col++) {
+              if (Math.random() < glowChance) {
+                this.windowGfx.fillStyle(glowColor, glowAlpha);
+                this.windowGfx.fillRect(
+                  winStartX + col * winSpacingX,
+                  building.y + 20 + row * 30,
+                  12,
+                  12
+                );
+              }
+            }
           }
         }
       },
@@ -670,6 +690,44 @@ export class TownScene extends Phaser.Scene {
       }
       this.chattingTimers.delete(agentId);
     }));
+  }
+
+  // ── NPC Management ──────────────────────────────────────
+
+  /** Spawn a temporary NPC — walks in from off-screen to the lounge */
+  spawnNPC(config: AgentConfig): void {
+    if (this.agents.has(config.id)) return; // already exists
+
+    // Start off-screen left
+    const startX = -40;
+    const startY = 400 + Math.random() * 100;
+
+    const agent = new Agent(this, config, startX, startY);
+    this.agents.set(config.id, agent);
+    this.agentLocations.set(config.id, "path_left");
+
+    // Walk to lounge
+    this.moveAgent(config.id, "lounge");
+  }
+
+  /** Remove an NPC — walks off-screen then gets destroyed */
+  despawnNPC(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+
+    // Release slot
+    const currentBuilding = this.agentLocations.get(agentId) ?? "lounge";
+    this.releaseSlot(agentId, currentBuilding);
+
+    // Walk off-screen right
+    const exitX = 1150;
+    const exitY = 400 + Math.random() * 100;
+
+    agent.walkTo([{ x: exitX, y: exitY }], () => {
+      agent.destroy();
+      this.agents.delete(agentId);
+      this.agentLocations.delete(agentId);
+    });
   }
 
   // ── Idle behavior ────────────────────────────────────────

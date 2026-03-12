@@ -1,4 +1,5 @@
 import { state } from "../state";
+import { isNPC } from "./npcs";
 import { broadcast } from "../ws-bridge";
 import { callMinimax, parseJsonAction } from "./brain";
 import { buildSystemPrompt, buildUserPrompt } from "./prompts";
@@ -45,7 +46,7 @@ async function runTick(): Promise<void> {
   const onDirective = new Set(
     agents.filter((a) => a.directive && a.directiveUntil > now).map((a) => a.id)
   );
-  const available = agents.filter((a) => a.cooldownUntil <= now);
+  const available = agents.filter((a) => a.cooldownUntil <= now && !isNPC(a.id));
   if (available.length === 0) return;
 
   // Split by role
@@ -340,7 +341,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
   if (isContextEnabled() && canCreateMarket()) {
     // Build structured draft for agent-submit — use MarketDraft fields if available
     const isStructured = typeof result !== "string";
-    const endTimeHours = isStructured ? result.endTimeHours : 24;
+    const endTimeHours = isStructured ? result.endTimeHours : 48; // default 48h for unstructured fallback
     const endTime = new Date(Date.now() + endTimeHours * 60 * 60_000);
 
     const draft: AgentMarketDraft = {
@@ -353,7 +354,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
         : inferSources(question, topic),
       resolutionCriteria: isStructured
         ? result.resolutionCriteria
-        : `This market resolves YES if the event described in the question occurs before the end time. Otherwise it resolves NO. Resolution is determined by official sources and credible news reporting.`,
+        : `This market resolves YES if the event described in the question ("${question}") occurs before the market end time. This market resolves NO if the end time passes without the condition being met.\n\nEvidence sources: Major news outlets (Reuters, AP, Bloomberg), official announcements, or authoritative domain sources.\n\nClarifications:\n- Only confirmed, official reports count — rumors and leaks do not.\n- If the event is cancelled or postponed beyond the market end time, this resolves NO.`,
       endTime: `${endTime.getFullYear()}-${String(endTime.getMonth() + 1).padStart(2, "0")}-${String(endTime.getDate()).padStart(2, "0")} ${String(endTime.getHours()).padStart(2, "0")}:${String(endTime.getMinutes()).padStart(2, "0")}:00`,
       timezone: "America/New_York",
     };

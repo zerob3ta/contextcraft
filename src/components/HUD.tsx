@@ -343,9 +343,11 @@ function ChatAvatar({ agentId }: { agentId: string }) {
   );
 }
 
-function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: ChatMsg[] }) {
+function ChatMessageItem({ msg, allMessages, npcVisitors }: { msg: ChatMsg; allMessages: ChatMsg[]; npcVisitors?: Record<string, { name: string; color: string }> }) {
   const agent = msg.agentId ? ALL_AGENTS.find((a) => a.id === msg.agentId) : null;
-  const agentColor = agent?.color || "#888";
+  const npcInfo = msg.agentId ? npcVisitors?.[msg.agentId] : null;
+  const isNPC = msg.agentId?.startsWith("npc_") || false;
+  const agentColor = agent?.color || npcInfo?.color || (isNPC ? "#e879f9" : "#888");
 
   // --- Mood change ---
   if (msg.type === "mood_change") {
@@ -450,9 +452,9 @@ function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: Chat
             <span className="text-[11px] font-semibold" style={{ color: agentColor }}>
               {msg.agentName}
             </span>
-            {agent && (
-              <span className="text-[8px] uppercase tracking-wide text-white/25">
-                {agent.role}
+            {(agent || isNPC) && (
+              <span className="text-[8px] uppercase tracking-wide" style={{ color: isNPC ? "rgba(232,121,249,0.4)" : "rgba(255,255,255,0.25)" }}>
+                {isNPC ? "visitor" : agent?.role}
               </span>
             )}
             <span className="text-[8px] text-white/15 ml-auto flex-shrink-0">
@@ -530,9 +532,9 @@ function ChatMessageItem({ msg, allMessages }: { msg: ChatMsg; allMessages: Chat
             <span className="text-[11px] font-semibold" style={{ color: agentColor }}>
               {msg.agentName}
             </span>
-            {agent && (
-              <span className="text-[8px] uppercase tracking-wide text-white/25">
-                {agent.role}
+            {(agent || isNPC) && (
+              <span className="text-[8px] uppercase tracking-wide" style={{ color: isNPC ? "rgba(232,121,249,0.4)" : "rgba(255,255,255,0.25)" }}>
+                {isNPC ? "visitor" : agent?.role}
               </span>
             )}
             <span className="text-[8px] text-white/15 ml-auto flex-shrink-0">
@@ -552,10 +554,12 @@ function ChatStream({
   messages,
   activeBuilding,
   agentCountAtBuilding,
+  npcVisitors,
 }: {
   messages: ChatMsg[];
   activeBuilding: RealBuilding | "all";
   agentCountAtBuilding: number;
+  npcVisitors?: Record<string, { name: string; color: string }>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -605,7 +609,7 @@ function ChatStream({
             </div>
           ) : (
             filtered.map((msg) => (
-              <ChatMessageItem key={msg.id} msg={msg} allMessages={messages} />
+              <ChatMessageItem key={msg.id} msg={msg} allMessages={messages} npcVisitors={npcVisitors} />
             ))
           )}
         </div>
@@ -876,6 +880,8 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
   const [activeBuilding, setActiveBuilding] = useState<RealBuilding | "all">("all");
   // Track recent activity per building for nav indicators
   const [recentBuildingActivity, setRecentBuildingActivity] = useState<Set<string>>(new Set());
+  // NPC visitor info (id → { name, color })
+  const [npcVisitors, setNpcVisitors] = useState<Record<string, { name: string; color: string }>>({});
   // Mobile tab state
   const [mobileTab, setMobileTab] = useState<MobileTab>("town");
 
@@ -1239,6 +1245,40 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           });
           break;
         }
+
+        case "npc_spawn": {
+          setNpcVisitors((prev) => ({
+            ...prev,
+            [event.agentId]: { name: event.name, color: event.color },
+          }));
+          addChatMessage({
+            type: "activity",
+            agentId: event.agentId,
+            agentName: event.name,
+            message: `${event.name} just walked into the lounge`,
+            building: "lounge",
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
+        case "npc_despawn": {
+          setNpcVisitors((prev) => {
+            const npcName = prev[event.agentId]?.name || event.agentId;
+            addChatMessage({
+              type: "activity",
+              agentId: event.agentId,
+              agentName: npcName,
+              message: `${npcName} left the lounge`,
+              building: "lounge",
+              timestamp: Date.now(),
+            });
+            const n = { ...prev };
+            delete n[event.agentId];
+            return n;
+          });
+          break;
+        }
       }
     });
 
@@ -1344,6 +1384,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
                     ? ALL_AGENTS.length
                     : Object.values(agentLocations).filter((l) => l === activeBuilding).length
                 }
+                npcVisitors={npcVisitors}
               />
             </div>
           )}
@@ -1378,6 +1419,7 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
                 ? ALL_AGENTS.length
                 : Object.values(agentLocations).filter((l) => l === activeBuilding).length
             }
+            npcVisitors={npcVisitors}
           />
         </div>
       </div>
