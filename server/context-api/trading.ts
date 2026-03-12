@@ -30,7 +30,11 @@ export async function cancelOrders(agentId: string, localMarketId: string): Prom
       .map((o) => o.nonce as `0x${string}`);
 
     if (openNonces.length > 0) {
-      await client.orders.bulkCancel(openNonces);
+      // API limit: max 20 cancels per bulk call
+      for (let i = 0; i < openNonces.length; i += 20) {
+        const batch = openNonces.slice(i, i + 20);
+        await client.orders.bulkCancel(batch);
+      }
       console.log(`[Trading] ${agentId}: cancelled ${openNonces.length} orders on ${localMarketId}`);
     }
 

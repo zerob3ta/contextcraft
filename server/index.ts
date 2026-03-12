@@ -65,13 +65,7 @@ if (envStatus.MINIMAX_API_KEY) {
 }
 
 // 5. Start NPC visitor spawner
-console.log("[Server] About to start NPC spawner...");
-try {
-  startNPCSpawner();
-  console.log("[Server] NPC spawner started OK");
-} catch (err) {
-  console.error("[Server] NPC spawner FAILED to start:", err);
-}
+startNPCSpawner();
 
 console.log("\n[Server] All systems go. Press Ctrl+C to stop.\n");
 

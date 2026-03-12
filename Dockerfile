@@ -7,5 +7,4 @@ RUN npm ci
 
 COPY . .
 
-# Cache bust: 2026-03-12-v2
 CMD ["npx", "tsx", "server/index.ts"]
