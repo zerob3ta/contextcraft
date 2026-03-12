@@ -47,8 +47,8 @@ const CONVICTION_DECAY_PER_TICK = 3;
 const MOOD_DECAY_TICKS = 15; // extreme moods decay after 15 ticks without reinforcement
 // Prompt target: what we ASK the LLM to aim for (via prompt instructions)
 // Render limit: hard cap on what we'll actually send to the frontend (never truncate mid-thought)
-const PROMPT_TARGET_LENGTH = 140; // chars — what we tell the LLM to aim for
-const RENDER_MAX_LENGTH = 350;    // chars — hard cap, but we never truncate below this
+const PROMPT_TARGET_LENGTH = 120; // chars — what we tell the LLM to aim for
+const RENDER_MAX_LENGTH = 180;    // chars — hard cap for frontend display and speech bubbles
 
 // Where each role goes to fulfill directives
 const ROLE_WORK_BUILDINGS: Record<string, Building> = {

@@ -30,10 +30,9 @@ const IDLE_CHAT_MESSAGES: { message: string; emotion: Emotion }[] = [
   { message: "My models are recalibrating...", emotion: "cautious" },
 ];
 
-// Truncate text for speech bubbles — full message goes to HUD chat panel
-function bubbleText(text: string, maxLen = 60): string {
+// Light trim for speech bubbles — the bubble's own clampLines handles overflow
+function bubbleText(text: string, maxLen = 140): string {
   if (text.length <= maxLen) return text;
-  // Cut at last space before maxLen
   const cut = text.lastIndexOf(" ", maxLen);
   return text.slice(0, cut > 20 ? cut : maxLen) + "…";
 }

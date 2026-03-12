@@ -15,14 +15,14 @@ const EMOTION_TEXT_COLORS: Record<Emotion, string> = {
   frustrated: "#7f1d1d",
 };
 
-const MAX_WIDTH = 250;
+const MAX_WIDTH = 280;
 const PADDING_X = 10;
 const PADDING_Y = 6;
 const TAIL_SIZE = 6;
 const BORDER_RADIUS = 4;
 const FONT_SIZE = 11;
 const LINE_HEIGHT = 14;
-const MAX_LINES = 4;
+const MAX_LINES = 5;
 const DISPLAY_DURATION = 4000;
 const FADE_DURATION = 400;
 const MAX_BUBBLES = 2;
@@ -63,6 +63,7 @@ export class SpeechBubble extends Phaser.GameObjects.Container {
     this.add(this.label);
 
     this.drawBubble();
+    this.clampLines();
 
     this.setAlpha(0);
     this.setDepth(1000);
