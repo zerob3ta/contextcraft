@@ -20,7 +20,7 @@ function buildSocialPrompt(agentId: string): { system: string; user: string } {
   const news = state.getRecentNews(4);
   const markets = state.getActiveMarkets();
 
-  const system = `You are ${agent.name}, a ${agent.role} in a prediction market town called ContextCraft.
+  const system = `You are ${agent.name}, a ${agent.role} in a Context Markets agent simulation called MarketCraft.
 
 PERSONALITY: ${agent.personality}
 SPECIALTY: ${agent.specialty}

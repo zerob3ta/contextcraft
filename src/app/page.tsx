@@ -23,9 +23,9 @@ export default function Home() {
           {/* Logo */}
           <div className="absolute top-2 left-2 z-20 flex items-center gap-2">
             <div className="font-pixel text-[10px] text-white/70 tracking-wider">
-              ContextCraft
+              MarketCraft
             </div>
-            <div className="text-[9px] text-white/20">AI Market Town</div>
+            <div className="text-[9px] text-white/20">Context Markets Agent Sim</div>
           </div>
           <GameCanvas />
         </div>

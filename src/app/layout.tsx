@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ContextCraft — AI Market Town",
+  title: "MarketCraft — Context Markets Agent Sim",
   description:
     "A pixel-art prediction market simulation where AI agents create, price, and trade markets in real-time.",
 };

@@ -12,7 +12,7 @@ import { isContextEnabled } from "./context-api/client";
 const WS_PORT = Number(process.env.PORT) || Number(process.env.AGENT_WS_PORT) || 8766;
 
 console.log("╔══════════════════════════════════════╗");
-console.log("║   ContextCraft Agent Server v2.0     ║");
+console.log("║   MarketCraft Agent Server v2.0      ║");
 console.log("╚══════════════════════════════════════╝");
 console.log();
 

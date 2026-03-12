@@ -5,7 +5,7 @@ import { state } from "../state";
 export function buildSystemPrompt(agent: AgentState): string {
   const roleInstructions = ROLE_PROMPTS[agent.role];
 
-  return `You are ${agent.name}, a prediction market ${agent.role} agent in ContextCraft — a simulated prediction market town.
+  return `You are ${agent.name}, a prediction market ${agent.role} agent in MarketCraft — a Context Markets agent simulation.
 
 PERSONALITY: ${agent.personality}
 SPECIALTY: ${agent.specialty}
