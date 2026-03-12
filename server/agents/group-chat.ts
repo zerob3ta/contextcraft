@@ -94,6 +94,30 @@ export function getChatLog(): ChatMessage[] {
   return chatLog;
 }
 
+/** Add an NPC message to chat log and broadcast it — makes NPCs visible to other agents */
+export function addNPCMessage(agentId: string, agentName: string, message: string, building: string): void {
+  const msg = addMessage(
+    { id: agentId, name: agentName, role: "trader", personality: "", specialty: "", location: building as Building, lastActionAt: 0, lastSpoke: "", cooldownUntil: 0, directive: null, directiveUntil: 0, researchResult: null, researchQuery: null },
+    message,
+    "neutral",
+    null,
+    building,
+  );
+
+  broadcast({
+    type: "chat_message",
+    id: msg.id,
+    agentId,
+    agentName,
+    role: "visitor",
+    message: msg.message,
+    mood: "neutral",
+    replyTo: null,
+    replyPreview: null,
+    building,
+  });
+}
+
 export function getAgentMood(agentId: string): AgentMood {
   return agentMoods.get(agentId)?.mood || "neutral";
 }
@@ -259,6 +283,9 @@ function updateAgentMagnetism(available: AgentState[]): void {
   const now = Date.now();
 
   for (const agent of available) {
+    // NPCs stay in the lounge — don't move them around
+    if (isNPC(agent.id)) continue;
+
     const currentLoc = agent.location;
     const ticks = agentBuildingTicks.get(agent.id) || 0;
 
@@ -417,6 +444,9 @@ function selectSpeakers(pool: AgentState[], count: number): AgentState[] {
     if (loudAgents.includes(agent.id)) score += 8;
     if (quietAgents.includes(agent.id)) score -= 5;
 
+    // NPC visitors get a big boost — they're temporary and should be heard
+    if (isNPC(agent.id)) score += 30;
+
     // Noise factor
     score += Math.random() * 20 - 10;
 
@@ -534,6 +564,16 @@ Only include conviction if this conversation genuinely shifted your view on a SP
   // Lounge gets NO market context — keep it off-topic
   if (!isLounge && marketContext) {
     parts.push(marketContext);
+  }
+
+  // If NPCs are present in the lounge, tell the agent about them
+  if (isLounge) {
+    const { getActiveNPCStates } = require("./npcs");
+    const npcStates = getActiveNPCStates() as AgentState[];
+    if (npcStates.length > 0 && !isNPC(agent.id)) {
+      const npcNames = npcStates.map((n) => n.name).join(", ");
+      parts.push(`\nVISITORS IN THE LOUNGE: ${npcNames} just walked in. They're new here — engage with them! Ask who they are, react to what they say, include them in conversation.`);
+    }
   }
 
   // News is ONLY available in the newsroom — the intelligence hub

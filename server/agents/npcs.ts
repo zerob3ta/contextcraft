@@ -280,19 +280,9 @@ function spawnNPC(template: NPCTemplate): void {
     spriteFeatures: template.spriteFeatures,
   });
 
-  // Announce arrival in chat
-  broadcast({
-    type: "chat_message",
-    id: `npc-arrive-${id}`,
-    agentId: id,
-    agentName: template.name,
-    role: "visitor",
-    message: getArrivalMessage(template),
-    mood: "neutral",
-    replyTo: null,
-    replyPreview: null,
-    building: "lounge",
-  });
+  // Announce arrival via group chat system so it appears in agents' attention window
+  const { addNPCMessage } = require("./group-chat");
+  addNPCMessage(id, template.name, getArrivalMessage(template), "lounge");
 
   console.log(`[NPCs] ${template.name} has arrived! (staying for ${stayTicks} ticks)`);
 }
@@ -301,19 +291,9 @@ function despawnNPC(id: string): void {
   const npc = activeNPCs.get(id);
   if (!npc) return;
 
-  // Farewell message
-  broadcast({
-    type: "chat_message",
-    id: `npc-depart-${id}`,
-    agentId: id,
-    agentName: npc.template.name,
-    role: "visitor",
-    message: getDepartureMessage(npc.template),
-    mood: "neutral",
-    replyTo: null,
-    replyPreview: null,
-    building: "lounge",
-  });
+  // Farewell message via group chat system
+  const { addNPCMessage } = require("./group-chat");
+  addNPCMessage(id, npc.template.name, getDepartureMessage(npc.template), "lounge");
 
   // Broadcast despawn to clients
   broadcast({
