@@ -405,15 +405,14 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
   const newsContext = news.map((n) => `- ${n.headline}: ${n.snippet}`).join("\n");
   const result = await draftMarket(topic, newsContext);
 
-  if (!result) {
-    console.log(`[Creator:${agent.name}] Claude returned null for topic: ${topic.slice(0, 60)}`);
+  if (!result || typeof result === "string") {
+    console.log(`[Creator:${agent.name}] Draft rejected (no structured market) for topic: ${topic.slice(0, 60)}`);
     state.setAgentCooldown(agentId, 20_000);
     returnToLounge(agentId, 20_000);
     return;
   }
 
-  // Extract question string from result (structured MarketDraft or plain string)
-  const question = typeof result === "string" ? result : result.question;
+  const question = result.question;
 
   if (state.isDuplicateMarket(question)) {
     console.log(`[Creator:${agent.name}] Duplicate market: ${question.slice(0, 80)}`);
@@ -424,22 +423,15 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
 
   // Use Context API if available, otherwise local-only
   if (isContextEnabled() && canCreateMarket()) {
-    // Build structured draft for agent-submit — use MarketDraft fields if available
-    const isStructured = typeof result !== "string";
-    const endTimeHours = isStructured ? result.endTimeHours : 48; // default 48h for unstructured fallback
-    const endTime = new Date(Date.now() + endTimeHours * 60 * 60_000);
+    const endTime = new Date(Date.now() + result.endTimeHours * 60 * 60_000);
 
     const draft: AgentMarketDraft = {
       formattedQuestion: question,
-      shortQuestion: isStructured ? result.shortQuestion : (question.length > 200 ? question.slice(0, 197) + "..." : question),
+      shortQuestion: result.shortQuestion,
       marketType: "OBJECTIVE",
-      evidenceMode: isStructured ? result.evidenceMode : "web_enabled",
-      sources: isStructured
-        ? result.sources.map((s) => s.startsWith("@") ? `https://x.com/${s.slice(1)}` : s)
-        : inferSources(question, topic),
-      resolutionCriteria: isStructured
-        ? result.resolutionCriteria
-        : `This market resolves YES if the event described in the question ("${question}") occurs before the market end time. This market resolves NO if the end time passes without the condition being met.\n\nEvidence sources: Major news outlets (Reuters, AP, Bloomberg), official announcements, or authoritative domain sources.\n\nClarifications:\n- Only confirmed, official reports count — rumors and leaks do not.\n- If the event is cancelled or postponed beyond the market end time, this resolves NO.`,
+      evidenceMode: result.evidenceMode,
+      sources: result.sources.map((s) => s.startsWith("@") ? `https://x.com/${s.slice(1)}` : s),
+      resolutionCriteria: result.resolutionCriteria,
       endTime: `${endTime.getFullYear()}-${String(endTime.getMonth() + 1).padStart(2, "0")}-${String(endTime.getDate()).padStart(2, "0")} ${String(endTime.getHours()).padStart(2, "0")}:${String(endTime.getMinutes()).padStart(2, "0")}:00`,
       timezone: "America/New_York",
     };
@@ -447,7 +439,7 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
     // Non-blocking submit — goes to background poller
     const submissionId = await submitMarket(agentId, draft, question);
     if (submissionId) {
-      console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 80)} (${endTimeHours}h, ${draft.evidenceMode})`);
+      console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 80)} (${result.endTimeHours}h, ${draft.evidenceMode})`);
       const market = state.createMarket(question, agentId);
       state.lastMarketCreatedAt = Date.now();
       broadcast({
@@ -484,44 +476,6 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
 
   state.setAgentCooldown(agentId, 20_000);
   returnToLounge(agentId, 20_000);
-}
-
-/**
- * Infer resolution sources from the question topic.
- * Context API expects X account URLs (https://x.com/handle) or web URLs.
- */
-function inferSources(question: string, topic: string): string[] {
-  const q = (question + " " + topic).toLowerCase();
-  const sources: string[] = [];
-
-  // Sports — use well-known verified X accounts
-  if (q.match(/nba|nfl|nhl|ncaa|laker|celtics|cavalier|knick|spread|game.*tonight|win.*tonight|beat|cover/)) {
-    sources.push("https://x.com/espn");
-    sources.push("https://x.com/sportscenter");
-  }
-  // Crypto
-  if (q.match(/btc|eth|bitcoin|crypto|token|solana|defi/)) {
-    sources.push("https://x.com/coindesk");
-    sources.push("https://x.com/coingecko");
-  }
-  // Politics
-  if (q.match(/trump|congress|president|fed|election|senate|house|vote/)) {
-    sources.push("https://x.com/ap");
-    sources.push("https://x.com/reuters");
-  }
-  // Tech
-  if (q.match(/apple|google|openai|ai|nvidia|tesla|spacex|tech/)) {
-    sources.push("https://x.com/reuters");
-    sources.push("https://x.com/techcrunch");
-  }
-
-  // Always include at least one general source
-  if (sources.length === 0) {
-    sources.push("https://x.com/ap");
-    sources.push("https://x.com/reuters");
-  }
-
-  return sources.slice(0, 5);
 }
 
 /**

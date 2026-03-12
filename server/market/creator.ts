@@ -116,12 +116,13 @@ JSON only.`;
 
 /**
  * Draft a complete market using Claude.
- * Returns a structured MarketDraft, or falls back to question-only.
+ * Returns a structured MarketDraft with proper resolution criteria, or null if it can't produce one.
+ * We never create markets without proper RC — better to skip than ship garbage.
  */
 export async function draftMarket(
   topic: string,
   newsContext: string
-): Promise<MarketDraft | string | null> {
+): Promise<MarketDraft | null> {
   try {
     const anthropic = getClient();
 
@@ -143,9 +144,13 @@ export async function draftMarket(
       return null;
     }
 
-    // Try to parse as structured JSON
+    // Try to parse as structured JSON — strip markdown fences if present
     try {
-      const parsed = JSON.parse(text);
+      let jsonStr = text;
+      // Claude sometimes wraps JSON in ```json ... ``` despite instructions
+      const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+      if (fenceMatch) jsonStr = fenceMatch[1].trim();
+      const parsed = JSON.parse(jsonStr);
       if (parsed.question && parsed.resolutionCriteria) {
         const draft: MarketDraft = {
           question: parsed.question,
@@ -164,18 +169,36 @@ export async function draftMarket(
         console.log(`[Creator] Drafted: "${draft.question}" (${draft.evidenceMode}, ${draft.endTimeHours}h, ${draft.sources.length} sources)`);
         return draft;
       }
-    } catch {
-      // Not valid JSON — try extracting just the question
+    } catch (parseErr) {
+      // JSON parse failed — try to find a JSON object embedded in the response
+      const objectMatch = text.match(/\{[\s\S]*"question"[\s\S]*"resolutionCriteria"[\s\S]*\}/);
+      if (objectMatch) {
+        try {
+          const parsed = JSON.parse(objectMatch[0]);
+          if (parsed.question && parsed.resolutionCriteria) {
+            const draft: MarketDraft = {
+              question: parsed.question,
+              shortQuestion: parsed.shortQuestion || parsed.question.slice(0, 100),
+              resolutionCriteria: parsed.resolutionCriteria,
+              evidenceMode: parsed.evidenceMode === "social_only" ? "social_only" : "web_enabled",
+              sources: Array.isArray(parsed.sources) ? parsed.sources.slice(0, 5) : [],
+              endTimeHours: Math.max(4, Math.min(168, Number(parsed.endTimeHours) || 24)),
+            };
+
+            if (draft.question.endsWith("?") && draft.question.length >= 10) {
+              console.log(`[Creator] Drafted (recovered JSON): "${draft.question}" (${draft.evidenceMode}, ${draft.endTimeHours}h)`);
+              return draft;
+            }
+          }
+        } catch {
+          // Still not valid — fall through
+        }
+      }
+      console.log(`[Creator] JSON parse failed: ${(parseErr as Error).message?.slice(0, 80)}`);
     }
 
-    // Fallback: treat as plain question string
-    const question = text.replace(/^["']|["']$/g, "").trim();
-    if (question.endsWith("?") && question.length >= 10 && question.length <= 300) {
-      console.log(`[Creator] Drafted (simple): "${question}"`);
-      return question;
-    }
-
-    console.log(`[Creator] Draft rejected: "${text.slice(0, 80)}"`);
+    // No structured JSON recovered — reject. Don't create markets without proper RC.
+    console.log(`[Creator] Draft rejected (no structured JSON): "${text.slice(0, 100)}"`);
     return null;
   } catch (err) {
     console.error("[Creator] Claude draft error:", err);
