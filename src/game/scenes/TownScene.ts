@@ -26,7 +26,79 @@ export class TownScene extends Phaser.Scene {
     this.drawBuildings();
     this.spawnAgents();
     this.addBuildingAnimations();
+    this.setupCamera();
   }
+
+  // ── Camera (pan + zoom) ────────────────────────────────────
+
+  private setupCamera(): void {
+    const cam = this.cameras.main;
+
+    // World bounds cover all buildings + some padding
+    cam.setBounds(0, 0, 1100, 750);
+
+    // Center the camera on the town
+    cam.centerOn(550, 375);
+
+    // --- Drag-to-pan ---
+    this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      // Only start drag if no building was clicked (handled by hit zones)
+      if (pointer.downElement?.tagName === "CANVAS") {
+        this._dragStart = { x: cam.scrollX, y: cam.scrollY, px: pointer.x, py: pointer.y };
+      }
+    });
+
+    this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
+      if (!pointer.isDown || !this._dragStart) return;
+      const zoom = cam.zoom;
+      cam.scrollX = this._dragStart.x - (pointer.x - this._dragStart.px) / zoom;
+      cam.scrollY = this._dragStart.y - (pointer.y - this._dragStart.py) / zoom;
+    });
+
+    this.input.on("pointerup", () => {
+      this._dragStart = null;
+    });
+
+    // --- Pinch-to-zoom (touch) ---
+    this.input.addPointer(1); // enable 2nd pointer for multi-touch
+
+    this.input.on("pointerdown", () => {
+      const pointers = this.input.manager.pointers.filter((p: Phaser.Input.Pointer) => p.isDown);
+      if (pointers.length === 2) {
+        const [p1, p2] = pointers;
+        this._pinchStartDist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
+        this._pinchStartZoom = cam.zoom;
+      }
+    });
+
+    this.input.on("pointermove", () => {
+      if (this._pinchStartDist === null) return;
+      const pointers = this.input.manager.pointers.filter((p: Phaser.Input.Pointer) => p.isDown);
+      if (pointers.length < 2) return;
+      const [p1, p2] = pointers;
+      const dist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
+      const scale = dist / this._pinchStartDist!;
+      cam.zoom = Phaser.Math.Clamp(this._pinchStartZoom! * scale, 0.5, 3);
+    });
+
+    this.input.on("pointerup", () => {
+      const pointers = this.input.manager.pointers.filter((p: Phaser.Input.Pointer) => p.isDown);
+      if (pointers.length < 2) {
+        this._pinchStartDist = null;
+        this._pinchStartZoom = null;
+      }
+    });
+
+    // --- Scroll-wheel zoom (desktop) ---
+    this.input.on("wheel", (_pointer: Phaser.Input.Pointer, _go: unknown[], _dx: number, dy: number) => {
+      const newZoom = cam.zoom - dy * 0.001;
+      cam.zoom = Phaser.Math.Clamp(newZoom, 0.5, 3);
+    });
+  }
+
+  private _dragStart: { x: number; y: number; px: number; py: number } | null = null;
+  private _pinchStartDist: number | null = null;
+  private _pinchStartZoom: number | null = null;
 
   // ── Drawing ──────────────────────────────────────────────
 

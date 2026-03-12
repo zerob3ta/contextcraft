@@ -618,6 +618,234 @@ function ChatStream({
 // Main HUD
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Mobile tab types
+// ---------------------------------------------------------------------------
+
+type MobileTab = "town" | "chat" | "markets" | "agents";
+
+// ---------------------------------------------------------------------------
+// MobileTabBar
+// ---------------------------------------------------------------------------
+
+function MobileTabBar({ active, onChange }: { active: MobileTab; onChange: (t: MobileTab) => void }) {
+  const tabs: { id: MobileTab; label: string; icon: React.ReactNode }[] = [
+    {
+      id: "town",
+      label: "Town",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M10 2L2 8v10h6v-6h4v6h6V8L10 2z" stroke="currentColor" strokeWidth="1.5" fill="none" />
+        </svg>
+      ),
+    },
+    {
+      id: "chat",
+      label: "Chat",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M4 4h12v9H7l-3 3V4z" stroke="currentColor" strokeWidth="1.5" fill="none" />
+        </svg>
+      ),
+    },
+    {
+      id: "markets",
+      label: "Markets",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <rect x="3" y="12" width="3" height="4" rx="0.5" fill="currentColor" />
+          <rect x="8.5" y="8" width="3" height="8" rx="0.5" fill="currentColor" />
+          <rect x="14" y="5" width="3" height="11" rx="0.5" fill="currentColor" />
+        </svg>
+      ),
+    },
+    {
+      id: "agents",
+      label: "Agents",
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <circle cx="10" cy="7" r="3.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
+          <path d="M4 17c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" strokeWidth="1.5" fill="none" />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <div className="flex items-center justify-around bg-[#0f0f1a]/95 backdrop-blur-sm border-t border-white/5 pt-2 pb-6 flex-shrink-0 md:hidden">
+      {tabs.map((t) => {
+        const isActive = active === t.id;
+        return (
+          <button
+            key={t.id}
+            onClick={() => onChange(t.id)}
+            className={`flex flex-col items-center gap-1 transition-colors ${
+              isActive ? "text-[#a3e635]" : "text-white/35"
+            }`}
+          >
+            {t.icon}
+            <span className="text-[9px] font-mono">{t.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MobileMarketsPanel — shows market cards on mobile
+// ---------------------------------------------------------------------------
+
+function MobileMarketsPanel({ markets }: { markets: MarketState[] }) {
+  return (
+    <div className="flex-1 overflow-y-auto hud-scroll p-3 space-y-2">
+      {markets.length === 0 ? (
+        <div className="text-[11px] text-white/20 italic pt-8 text-center">
+          No markets yet...
+        </div>
+      ) : (
+        markets.map((m) => {
+          const price = m.fairValue !== null ? Math.round(m.fairValue * 100) : null;
+          return (
+            <div key={m.id} className="rounded-lg bg-white/[0.03] border border-white/5 p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="text-[8px] font-pixel uppercase tracking-wider text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded">
+                  Live
+                </span>
+                <span className="text-[9px] text-white/25 ml-auto">
+                  {m.recentActions.length} trades
+                </span>
+              </div>
+              <div className="text-[12px] text-[#e8e6e1] font-medium leading-snug mb-2">
+                {m.question}
+              </div>
+              <div className="flex items-baseline gap-2">
+                {price !== null ? (
+                  <>
+                    <span className="text-[22px] font-bold text-white tabular-nums">{price}</span>
+                    <span className="text-[11px] text-white/30">¢</span>
+                    {m.spread !== null && (
+                      <span className="text-[9px] text-white/25">spread {Math.round(m.spread * 100)}¢</span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-[11px] text-white/30">UNPRICED</span>
+                )}
+              </div>
+              {m.recentActions.length > 0 && (
+                <div className="mt-2 text-[9px] text-white/30">
+                  last: {m.recentActions[m.recentActions.length - 1].agentName}{" "}
+                  {m.recentActions[m.recentActions.length - 1].action}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MobileAgentsPanel — shows agent roster grouped by building
+// ---------------------------------------------------------------------------
+
+function MobileAgentsPanel({
+  agentLocations,
+  agentMoods,
+  agentDirectives,
+  onSelectAgent,
+}: {
+  agentLocations: Record<string, string>;
+  agentMoods: Record<string, AgentMood>;
+  agentDirectives: Record<string, string>;
+  onSelectAgent: (agent: AgentConfig) => void;
+}) {
+  // Group agents by building
+  const byBuilding = new Map<string, AgentConfig[]>();
+  for (const agent of ALL_AGENTS) {
+    const loc = agentLocations[agent.id] || "lounge";
+    if (!byBuilding.has(loc)) byBuilding.set(loc, []);
+    byBuilding.get(loc)!.push(agent);
+  }
+
+  const buildingOrder = ["exchange", "pit", "newsroom", "lounge", "workshop"];
+
+  return (
+    <div className="flex-1 overflow-y-auto hud-scroll p-3 space-y-1">
+      {buildingOrder.map((buildingId) => {
+        const agents = byBuilding.get(buildingId);
+        if (!agents || agents.length === 0) return null;
+        const nav = BUILDING_NAV.find((b) => b.id === buildingId);
+
+        return (
+          <div key={buildingId}>
+            {/* Section header */}
+            <div className="flex items-center gap-2 py-2">
+              <span className="text-[9px] font-mono text-white/30 uppercase tracking-wider">
+                {nav?.label || buildingId}
+              </span>
+              <div className="flex-1 h-px bg-white/5" />
+            </div>
+
+            {/* Agent cards */}
+            <div className="space-y-1">
+              {agents.map((agent) => {
+                const mood = agentMoods[agent.id];
+                const directive = agentDirectives[agent.id];
+                const moodColor = mood ? MOOD_COLORS[mood] : undefined;
+
+                return (
+                  <button
+                    key={agent.id}
+                    onClick={() => onSelectAgent(agent)}
+                    className="flex items-center gap-2.5 w-full text-left px-3 py-2.5 rounded-lg bg-white/[0.02] active:bg-white/[0.06] transition-colors"
+                  >
+                    <div
+                      className="w-8 h-8 rounded-md flex items-center justify-center text-[11px] font-bold text-black/70 flex-shrink-0"
+                      style={{ backgroundColor: agent.color }}
+                    >
+                      {agent.name[0]}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[12px] font-semibold text-[#e2e8f0]">{agent.name}</span>
+                        <span
+                          className="text-[8px] uppercase tracking-wide px-1.5 py-0.5 rounded"
+                          style={{
+                            color: ROLE_COLORS[agent.role],
+                            backgroundColor: ROLE_COLORS[agent.role] + "1a",
+                          }}
+                        >
+                          {agent.role}
+                        </span>
+                        {mood && (
+                          <span className="text-[9px] font-mono" style={{ color: moodColor }}>
+                            {mood}
+                          </span>
+                        )}
+                      </div>
+                      {directive && (
+                        <div className="text-[9px] text-cyan-400/60 truncate mt-0.5">
+                          {directive}
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main HUD
+// ---------------------------------------------------------------------------
+
 export default function HUD({ children }: { children?: React.ReactNode }) {
   const startTime = useRef(Date.now());
   const nextNewsId = useRef(0);
@@ -648,6 +876,8 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
   const [activeBuilding, setActiveBuilding] = useState<RealBuilding | "all">("all");
   // Track recent activity per building for nav indicators
   const [recentBuildingActivity, setRecentBuildingActivity] = useState<Set<string>>(new Set());
+  // Mobile tab state
+  const [mobileTab, setMobileTab] = useState<MobileTab>("town");
 
   const getAgentName = useCallback((agentId: string): string => {
     return ALL_AGENTS.find((a) => a.id === agentId)?.name || agentId;
@@ -1017,16 +1247,58 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
     };
   }, [elapsed, getAgentName, getAgentRole, addChatMessage, markAgentChatting]);
 
+  // Detect mobile via CSS class approach — children renders once,
+  // layout CSS handles visibility
   return (
     <>
-      {/* Top: Breaking-only ticker */}
-      <div className="bg-black/60 backdrop-blur-sm border-b border-white/5 flex-shrink-0">
+      {/* ── TOP BAR ──────────────────────────────────────────── */}
+      {/* Desktop: breaking ticker */}
+      <div className="hidden md:block bg-black/60 backdrop-blur-sm border-b border-white/5 flex-shrink-0">
+        <BreakingTicker items={newsItems} />
+      </div>
+      {/* Mobile: compact header */}
+      <div className="flex md:hidden items-center justify-between px-3 py-2 bg-black/60 backdrop-blur-sm border-b border-white/5 flex-shrink-0">
+        <span className="font-pixel text-[10px] text-white/70 tracking-wider">MarketCraft</span>
+        <span className="text-[9px] text-white/20">Context Markets Agent Sim</span>
+      </div>
+
+      {/* Mobile-only: breaking ticker on Town tab */}
+      <div className={`md:hidden bg-black/40 border-b border-white/5 flex-shrink-0 ${mobileTab === "town" ? "" : "hidden"}`}>
         <BreakingTicker items={newsItems} />
       </div>
 
-      {/* Main row: left sidebar | canvas | right sidebar — all in flow */}
+      {/* Mobile-only: building filter pills on Chat/Agents tabs */}
+      <div className={`md:hidden flex gap-1.5 px-3 py-2 bg-black/30 border-b border-white/5 flex-shrink-0 overflow-x-auto ${
+        mobileTab === "chat" || mobileTab === "agents" ? "" : "hidden"
+      }`}>
+        <button
+          onClick={() => setActiveBuilding("all")}
+          className={`text-[10px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap transition-colors ${
+            activeBuilding === "all"
+              ? "text-[#a3e635] bg-[#a3e635]/10"
+              : "text-white/40 bg-white/5"
+          }`}
+        >
+          All
+        </button>
+        {BUILDING_NAV.map((b) => (
+          <button
+            key={b.id}
+            onClick={() => setActiveBuilding(b.id)}
+            className={`text-[10px] font-mono px-2.5 py-1 rounded-full whitespace-nowrap transition-colors ${
+              activeBuilding === b.id
+                ? "text-[#a3e635] bg-[#a3e635]/10"
+                : "text-white/40 bg-white/5"
+            }`}
+          >
+            {b.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── MAIN CONTENT ─────────────────────────────────────── */}
       <div className="flex-1 flex min-h-0">
-        {/* Left sidebar: Building Nav */}
+        {/* Desktop left sidebar: Building Nav */}
         <div className="w-44 bg-black/50 backdrop-blur-sm border-r border-white/5 p-2 overflow-y-auto hud-scroll hidden md:block flex-shrink-0">
           <BuildingNav
             activeBuilding={activeBuilding}
@@ -1039,29 +1311,64 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           />
         </div>
 
-        {/* Center: canvas (passed as children) + overlays */}
-        <div className="flex-1 relative min-w-0">
-          {children}
-
-          {/* Breaking banner overlay — on canvas only */}
-          <BreakingBanner items={newsItems} />
-
-          {/* Agent Inspector overlay — on canvas only */}
-          {selectedAgent && (
-            <div className="absolute inset-0 z-10 pointer-events-none">
-              <div className="pointer-events-auto">
-                <AgentInspector
-                  agent={selectedAgent}
-                  location={agentLocations[selectedAgent.id] || "lounge"}
-                  speeches={agentSpeeches[selectedAgent.id] || []}
-                  onClose={() => setSelectedAgent(null)}
-                />
+        {/* Center area: canvas + mobile tab panels */}
+        <div className="flex-1 relative min-w-0 min-h-0 flex flex-col">
+          {/* Canvas — always mounted. On mobile, hidden when not on Town tab */}
+          <div className={`md:flex-1 md:relative ${
+            mobileTab === "town" ? "flex-1 relative" : "hidden md:block"
+          }`}>
+            {children}
+            <BreakingBanner items={newsItems} />
+            {selectedAgent && (
+              <div className="absolute inset-0 z-10 pointer-events-none">
+                <div className="pointer-events-auto">
+                  <AgentInspector
+                    agent={selectedAgent}
+                    location={agentLocations[selectedAgent.id] || "lounge"}
+                    speeches={agentSpeeches[selectedAgent.id] || []}
+                    onClose={() => setSelectedAgent(null)}
+                  />
+                </div>
               </div>
+            )}
+          </div>
+
+          {/* Mobile-only: Chat tab */}
+          {mobileTab === "chat" && (
+            <div className="flex-1 min-h-0 flex flex-col md:hidden">
+              <ChatStream
+                messages={chatMessages}
+                activeBuilding={activeBuilding}
+                agentCountAtBuilding={
+                  activeBuilding === "all"
+                    ? ALL_AGENTS.length
+                    : Object.values(agentLocations).filter((l) => l === activeBuilding).length
+                }
+              />
+            </div>
+          )}
+
+          {/* Mobile-only: Markets tab */}
+          {mobileTab === "markets" && (
+            <div className="flex-1 min-h-0 md:hidden">
+              <MobileMarketsPanel markets={markets} />
+            </div>
+          )}
+
+          {/* Mobile-only: Agents tab */}
+          {mobileTab === "agents" && (
+            <div className="flex-1 min-h-0 md:hidden">
+              <MobileAgentsPanel
+                agentLocations={agentLocations}
+                agentMoods={agentMoods}
+                agentDirectives={agentDirectives}
+                onSelectAgent={setSelectedAgent}
+              />
             </div>
           )}
         </div>
 
-        {/* Right sidebar: Room chat */}
+        {/* Desktop right sidebar: Room chat */}
         <div className="w-[576px] bg-[#13161e]/95 backdrop-blur-sm border-l border-white/5 hidden lg:flex flex-col flex-shrink-0">
           <ChatStream
             messages={chatMessages}
@@ -1074,6 +1381,9 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           />
         </div>
       </div>
+
+      {/* Mobile bottom tab bar */}
+      <MobileTabBar active={mobileTab} onChange={setMobileTab} />
     </>
   );
 }
