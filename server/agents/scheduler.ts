@@ -484,6 +484,10 @@ function describeAction(_agent: AgentState, action: AgentAction): string {
   }
 }
 
+// Track sell attempts to prevent infinite sell loops on resolving markets
+const sellAttempts = new Map<string, number>(); // key: `${agentId}-${marketId}`
+const MAX_SELL_ATTEMPTS = 3;
+
 /**
  * Pre-tick cleanup: for every agent with open orders on resolving/resolved markets,
  * immediately cancel those orders without waiting for the LLM to decide.
@@ -513,7 +517,7 @@ function forceResolveCleanup(): void {
       }
     }
 
-    // Set directive to sell losing positions on resolving markets
+    // Set directive to sell losing positions on resolving markets (max 3 attempts)
     if (agent.positions && (agent.role === "trader" || agent.role === "pricer")) {
       if (agent.directive && agent.directiveUntil > Date.now()) continue; // don't override existing directive
       for (const pos of agent.positions) {
@@ -523,10 +527,17 @@ function forceResolveCleanup(): void {
         if (!outcomeStr) continue;
         const isLosing = pos.outcome.toUpperCase() !== outcomeStr;
         if (isLosing) {
+          const attemptKey = `${agent.id}-${m.id}`;
+          const attempts = sellAttempts.get(attemptKey) || 0;
+          if (attempts >= MAX_SELL_ATTEMPTS) {
+            // Already tried enough — stop looping
+            continue;
+          }
+          sellAttempts.set(attemptKey, attempts + 1);
           const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 40);
           agent.directive = `SELL your losing ${pos.outcome.toUpperCase()} position on "${shortQ}" [${m.id}] — market resolving ${outcomeStr}`;
           agent.directiveUntil = Date.now() + 30_000;
-          console.log(`[Scheduler:ForceCleanup] ${agent.name} DIRECTIVE: sell losing position on ${m.id}`);
+          console.log(`[Scheduler:ForceCleanup] ${agent.name} DIRECTIVE: sell losing position on ${m.id} (attempt ${attempts + 1}/${MAX_SELL_ATTEMPTS})`);
           break; // one directive at a time
         }
       }
