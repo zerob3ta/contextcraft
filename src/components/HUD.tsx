@@ -672,7 +672,7 @@ function MobileTabBar({ active, onChange }: { active: MobileTab; onChange: (t: M
   ];
 
   return (
-    <div className="flex items-center justify-around bg-transparent pt-1 pb-1 flex-shrink-0 md:hidden">
+    <div className="flex items-center justify-around pt-3 pb-2 flex-shrink-0 md:hidden" style={{ background: "linear-gradient(to top, rgba(15,15,26,0.95) 60%, transparent)" }}>
       {tabs.map((t) => {
         const isActive = active === t.id;
         return (
