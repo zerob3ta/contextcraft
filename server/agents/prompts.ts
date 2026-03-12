@@ -49,10 +49,11 @@ export function buildUserPrompt(
       parts.push(`USDC BALANCE: $${agent.usdcBalance.toFixed(2)}`);
     }
     if (agent.positions && agent.positions.length > 0) {
-      parts.push("YOUR POSITIONS (you can SELL these):");
+      parts.push("YOUR POSITIONS (you can SELL these — size = contracts):");
       for (const p of agent.positions.slice(0, 8)) {
         const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
         const label = m ? m.question.slice(0, 60) : "unknown market";
+        const dollarValue = Math.round(p.size * p.avgPrice * 100) / 100;
         // Flag positions on resolving/resolved markets
         let resTag = "";
         if (m && (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
@@ -61,7 +62,7 @@ export function buildUserPrompt(
           const isWinning = p.outcome.toUpperCase() === outcomeStr;
           resTag = isWinning ? " ✅WINNING" : " ❌LOSING→SELL NOW";
         }
-        parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" (avg ${Math.round(p.avgPrice * 100)}¢)${resTag}`);
+        parts.push(`  - ${p.outcome.toUpperCase()} ${Math.round(p.size)} contracts on "${label}" (avg ${Math.round(p.avgPrice * 100)}¢, ~$${dollarValue})${resTag}`);
       }
     }
     if (agent.openOrders && agent.openOrders.length > 0) {
@@ -75,7 +76,7 @@ export function buildUserPrompt(
             m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed")) {
           resTag = " ⚠️CANCEL→market resolving";
         }
-        parts.push(`  - ${o.side} ${o.size}x at ${o.price}¢ on "${label}"${resTag}`);
+        parts.push(`  - ${o.side} ${o.size} contracts at ${o.price}¢ on "${label}"${resTag}`);
       }
     }
   }
@@ -159,7 +160,7 @@ export function buildUserPrompt(
             const isWinning = p.outcome.toUpperCase() === outcomeStr;
             const label = m ? m.question.slice(0, 50) : "unknown";
             const action = isWinning ? "HOLD (winning side)" : "SELL IMMEDIATELY (losing side)";
-            parts.push(`  - ${p.outcome.toUpperCase()} ${p.size}x on "${label}" → ${action}`);
+            parts.push(`  - ${p.outcome.toUpperCase()} ${Math.round(p.size)} contracts on "${label}" → ${action}`);
           }
         }
       }
@@ -216,7 +217,7 @@ export function buildUserPrompt(
             const recentTrades = m.trades.slice(-3).reverse().map((t) => {
               const traderAgent = state.agents.get(t.agentId);
               const name = t.agentId === agent.id ? "YOU" : (traderAgent?.name || t.agentId);
-              return `${name} ${t.side} ${t.size}x`;
+              return `${name} ${t.side} ${Math.abs(t.size)}ct`;
             });
             attrTag += ` | last: ${recentTrades.join(", ")}`;
           }
@@ -323,7 +324,8 @@ RULES:
 - Every trade CANCELS your existing orders on that market first, then places the new one.
 - Check YOUR POSITIONS above — don't buy more of something you're already max long on. Consider selling instead.
 - side: "YES" or "NO" — which outcome you're trading. direction: "buy" or "sell".
-- Bigger size = higher conviction. But manage risk — don't put everything on one trade.
+- size = number of CONTRACTS (not dollars). Each contract costs (price in ¢) cents. Example: 50 contracts at 60¢ = $30.
+- Reasonable sizes: 20-200 contracts. Don't request thousands — you'll get clamped.
 - You CANNOT create or price markets — only trade.
 - ORACLE: When you see an oracle summary in the market listing, it's one AI model's qualitative take. Use it as context but form your OWN view. The oracle can be wrong.
 - ATTRIBUTION: Market listings show who is quoting and recent trades. Use this intel:

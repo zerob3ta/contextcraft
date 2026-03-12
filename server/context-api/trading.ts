@@ -282,6 +282,11 @@ export async function placeTrade(
 
       state.addTrade(localMarketId, agentId, side, -sellSize, price);
 
+      // Optimistically reduce local position so forceResolveCleanup doesn't re-fire
+      if (position) {
+        position.size = Math.max(0, position.size - sellSize);
+      }
+
       broadcast({
         type: "trade_executed",
         agentId,
