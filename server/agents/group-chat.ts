@@ -5,6 +5,7 @@
  */
 
 import { state } from "../state";
+import type { Market } from "../state";
 import { broadcast } from "../ws-bridge";
 import { callMinimax, parseJsonAction } from "./brain";
 import type { Building } from "../../src/game/config/agents";
@@ -512,6 +513,7 @@ RULES:
 - Reference agents by name. Be direct.
 - No emojis. Casual but sharp.
 - ONLY reference markets that appear in the ACTIVE MARKETS list below. Do NOT invent or hallucinate market names.
+- If a market is marked RESOLVING, it is DONE. The oracle proposal is final — it WILL resolve that way. Do not discuss it as if the outcome is uncertain. Do not suggest trading it. Acknowledge it's over and move on.
 - If replying, include their message ID in replyTo.
 
 Respond with JSON:
@@ -886,12 +888,35 @@ function checkDirectiveTrigger(agent: AgentState): void {
 function buildMarketContext(): string {
   const markets = state.getActiveMarkets();
   if (markets.length === 0) return "";
-  const lines = markets.slice(0, 5).map((m) => {
-    const price = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}%` : "unpriced";
-    const title = shortMarketTitle(m.question);
-    return `"${title}" (${price})`;
-  });
-  return `ACTIVE MARKETS: ${lines.join(" | ")}`;
+
+  const isResolving = (m: Market) =>
+    m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
+    m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed";
+
+  const resolving = markets.filter(isResolving);
+  const active = markets.filter((m) => !isResolving(m));
+
+  const parts: string[] = [];
+
+  if (resolving.length > 0) {
+    const lines = resolving.slice(0, 3).map((m) => {
+      const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : "?";
+      const title = shortMarketTitle(m.question);
+      return `"${title}" → RESOLVING ${outcomeStr}`;
+    });
+    parts.push(`🚨 RESOLVING (do NOT trade these): ${lines.join(" | ")}`);
+  }
+
+  if (active.length > 0) {
+    const lines = active.slice(0, 5).map((m) => {
+      const price = m.fairValue !== null ? `${Math.round(m.fairValue * 100)}%` : "unpriced";
+      const title = shortMarketTitle(m.question);
+      return `"${title}" (${price})`;
+    });
+    parts.push(`ACTIVE MARKETS: ${lines.join(" | ")}`);
+  }
+
+  return parts.join("\n");
 }
 
 function shortMarketTitle(question: string): string {

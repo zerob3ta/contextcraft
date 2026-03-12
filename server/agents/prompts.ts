@@ -124,12 +124,13 @@ export function buildUserPrompt(
 
     // ── RESOLVING/RESOLVED MARKETS (shown first, prominently) ──
     if (resolving.length > 0) {
-      parts.push("\n🚨 RESOLVING/RESOLVED MARKETS (DO NOT TRADE — cancel orders, sell losing positions):");
+      parts.push("\n🚨 RESOLVING/RESOLVED MARKETS — PROPOSAL means the oracle has decided the outcome. It WILL resolve this way. You have NO inside information to disagree.");
+      parts.push("ACTION REQUIRED: cancel all orders, sell losing positions at ANY price, hold winning positions.");
       for (const m of resolving) {
         const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
         const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : "?";
         const statusLabel = (m.apiStatus === "resolved" || m.apiStatus === "closed" || m.resolutionStatus === "resolved")
-          ? "RESOLVED" : "RESOLVING";
+          ? "RESOLVED" : "PROPOSAL";
         parts.push(`- ${shortTitle} [${m.id}] — ${statusLabel}→${outcomeStr}`);
       }
 
