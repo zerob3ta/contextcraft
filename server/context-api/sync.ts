@@ -11,6 +11,32 @@ import { notifyBuildingEvent } from "../agents/group-chat";
 import { sweepStaleOrders } from "./trading";
 
 
+/**
+ * Derive human-readable outcome string from API fields.
+ * Context Markets: outcome 0 = NO, outcome 1 = YES.
+ * Falls back to payoutPcts when outcome is null (e.g. during proposals).
+ */
+function inferOutcomeStr(
+  apiOutcome: number | null | undefined,
+  payoutPcts: number[] | null | undefined,
+  market?: { oracleSummary?: string | null }
+): string {
+  // Direct outcome field (most reliable when present)
+  if (apiOutcome === 0) return "NO";
+  if (apiOutcome === 1) return "YES";
+
+  // Derive from payoutPcts: the index with 1000000 (100%) is the winning outcome
+  if (payoutPcts && payoutPcts.length >= 2) {
+    if (payoutPcts[1] === 1000000) return "YES";
+    if (payoutPcts[0] === 1000000) return "NO";
+    // Partial payouts — pick the higher one
+    if (payoutPcts[1] > payoutPcts[0]) return "YES";
+    if (payoutPcts[0] > payoutPcts[1]) return "NO";
+  }
+
+  return "pending";
+}
+
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
 const TOPIC_SEARCH_INTERVAL_MS = 120_000; // 2min — search based on chat topics
@@ -194,7 +220,7 @@ async function syncMarkets(): Promise<void> {
 
           if (resolutionStatus === "pending" || apiStatus === "pending") {
             // Oracle PROPOSAL — this is breaking news (fires once per market)
-            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+            const outcomeStr = inferOutcomeStr(apiOutcome, payoutPcts, existing);
             const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
             if (state.markBreaking(`proposal-${existing.id}`)) {
               state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -207,7 +233,7 @@ async function syncMarkets(): Promise<void> {
 
           if (apiStatus === "resolved" || apiStatus === "closed") {
             // Resolution finalized — informational, not breaking (agents already know from proposal)
-            const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+            const outcomeStr = inferOutcomeStr(apiOutcome, payoutPcts, existing);
             const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
             state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
             notifyBuildingEvent("exchange");
@@ -372,7 +398,7 @@ async function checkExposedMarkets(): Promise<void> {
 
         if (resolutionStatus === "pending" || apiStatus === "pending") {
           // Oracle PROPOSAL — breaking, fires once per market
-          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+          const outcomeStr = inferOutcomeStr(apiOutcome, m.payoutPcts, existing);
           const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Pricers: pull your orders. Traders: close positions.`;
           if (state.markBreaking(`proposal-${existing.id}`)) {
             state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -385,7 +411,7 @@ async function checkExposedMarkets(): Promise<void> {
 
         if (apiStatus === "resolved" || apiStatus === "closed") {
           // Resolution finalized — informational, not breaking
-          const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+          const outcomeStr = inferOutcomeStr(apiOutcome, m.payoutPcts, existing);
           const headline = `RESOLVED: "${shortQ}" → ${outcomeStr}. Market is closed.`;
           state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
           notifyBuildingEvent("exchange");
@@ -397,7 +423,7 @@ async function checkExposedMarkets(): Promise<void> {
       // (market can be status:"active" but resolutionStatus:"pending")
       if (resolutionStatus === "pending" && prevResStatus !== "pending" && apiStatus === prevStatus) {
         const shortQ = existing.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
-        const outcomeStr = apiOutcome === 0 ? "YES" : apiOutcome === 1 ? "NO" : "unknown";
+        const outcomeStr = inferOutcomeStr(apiOutcome, m.payoutPcts, existing);
         const headline = `⚠️ RESOLUTION PROPOSED: "${shortQ}" → ${outcomeStr}. Cancel orders, close losing positions.`;
         if (state.markBreaking(`proposal-${existing.id}`)) {
           state.addNews({ headline, snippet: "", source: "Resolution", category: "Markets" });
@@ -494,13 +520,13 @@ function detectGameResults(): void {
 
       // For "beat"/"win" markets: YES if subject team won
       const subjectWon = subjectIsHome ? homeWon : !homeWon;
-      const outcome = subjectWon ? 0 : 1; // 0=YES, 1=NO
+      const outcome = subjectWon ? 1 : 0; // 0=NO, 1=YES (Context Markets convention)
 
       // Mark as locally resolving
       market.resolutionStatus = "pending";
       market.outcome = outcome;
 
-      const outcomeStr = outcome === 0 ? "YES" : "NO";
+      const outcomeStr = outcome === 1 ? "YES" : "NO";
       const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
       const scoreStr = `${game.awayScore}-${game.homeScore}`;
       const headline = `GAME OVER: ${game.shortName} final ${scoreStr}. "${shortQ}" → ${outcomeStr}. Cancel all orders.`;

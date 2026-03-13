@@ -986,7 +986,7 @@ function buildMarketContext(): string {
   if (resolving.length > 0) {
     parts.push("🚨 RESOLVING MARKETS (these are DONE — do NOT suggest trading):");
     for (const m of resolving.slice(0, 5)) {
-      const outcomeStr = m.outcome === 0 ? "YES (it happened)" : m.outcome === 1 ? "NO (didn't happen)" : "?";
+      const outcomeStr = m.outcome === 1 ? "YES (it happened)" : m.outcome === 0 ? "NO (didn't happen)" : "?";
       const title = shortMarketTitle(m.question);
       parts.push(`  - "${title}" → ${outcomeStr}`);
     }

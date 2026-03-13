@@ -85,7 +85,7 @@ export function buildUserPrompt(
         let resTag = "";
         if (m && (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
             m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed")) {
-          const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : "?";
+          const outcomeStr = m.outcome === 1 ? "YES" : m.outcome === 0 ? "NO" : "?";
           const isWinning = p.outcome.toUpperCase() === outcomeStr;
           resTag = isWinning ? " ✅WINNING" : " ❌LOSING→SELL NOW";
         }
@@ -219,7 +219,7 @@ export function buildUserPrompt(
       parts.push("ACTION REQUIRED: cancel all orders, sell losing positions at ANY price, hold winning positions.");
       for (const m of resolving) {
         const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 80);
-        const outcomeStr = m.outcome === 0 ? "YES (it happened)" : m.outcome === 1 ? "NO (it didn't happen)" : "?";
+        const outcomeStr = m.outcome === 1 ? "YES (it happened)" : m.outcome === 0 ? "NO (it didn't happen)" : "?";
         const statusLabel = (m.apiStatus === "resolved" || m.apiStatus === "closed" || m.resolutionStatus === "resolved")
           ? "RESOLVED" : "PROPOSAL";
         parts.push(`- ${shortTitle} [${m.id}] — ${statusLabel}→${outcomeStr}`);
@@ -248,7 +248,7 @@ export function buildUserPrompt(
             const m = resolving.find(
               (rm) => rm.id === p.marketId || rm.apiMarketId === p.marketId
             );
-            const outcomeStr = m?.outcome === 0 ? "YES" : m?.outcome === 1 ? "NO" : "?";
+            const outcomeStr = m?.outcome === 1 ? "YES" : m?.outcome === 0 ? "NO" : "?";
             const isWinning = p.outcome.toUpperCase() === outcomeStr;
             const label = m ? m.question.slice(0, 70) : "unknown";
             const action = isWinning ? "HOLD (winning side)" : "SELL IMMEDIATELY (losing side)";

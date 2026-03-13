@@ -42,7 +42,7 @@ export interface Market {
   resolutionStatus: "none" | "pending" | "resolved" | null;
   proposedAt: number | null;         // when resolution was proposed
   resolvedAt: number | null;         // when resolution was finalized
-  outcome: number | null;            // 0=YES won, 1=NO won, null=unresolved
+  outcome: number | null;            // 0=NO, 1=YES, null=unresolved
   payoutPcts: number[] | null;       // payout percentages per outcome
   // Oracle + quotes data (from Context Markets AI oracle)
   oracleProb: number | null;        // DEPRECATED — kept for compat, always null

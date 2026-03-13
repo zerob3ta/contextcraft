@@ -576,7 +576,7 @@ function forceResolveCleanup(): void {
       for (const pos of agent.positions) {
         const m = resolvingMarkets.get(pos.marketId);
         if (!m || pos.size <= 0) continue;
-        const outcomeStr = m.outcome === 0 ? "YES" : m.outcome === 1 ? "NO" : null;
+        const outcomeStr = m.outcome === 1 ? "YES" : m.outcome === 0 ? "NO" : null;
         if (!outcomeStr) continue;
         const isLosing = pos.outcome.toUpperCase() !== outcomeStr;
         if (isLosing) {
