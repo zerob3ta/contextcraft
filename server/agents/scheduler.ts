@@ -16,7 +16,7 @@ import type { AgentMarketDraft } from "../context-api/types";
 import type { AgentState, Market } from "../state";
 
 const TICK_INTERVAL_MS = 14_000; // unified tick every 14s (was 8s — reduced for cost)
-const JOB_AGENTS_PER_ROLE = 1; // 1 agent per role on job duty
+const PRICERS_PER_TICK = 2; // run up to 2 pricers per tick for better coverage
 const MARKET_CREATION_MIN_INTERVAL = 600_000; // 10min global cooldown between market creations
 const PORTFOLIO_REVIEW_EVERY_N_TICKS = 4; // every 4th tick, pricers/traders review their book
 
@@ -61,18 +61,27 @@ async function runTick(): Promise<void> {
   const pricers = available.filter((a) => a.role === "pricer");
   const traders = available.filter((a) => a.role === "trader");
 
-  // Pick 1 from each role for job duty
+  // Pick agents for job duty — up to 2 pricers, 1 each for creator/trader
   const shuffle = <T>(arr: T[]) => arr.sort(() => Math.random() - 0.5);
   const jobAgents: AgentState[] = [];
   if (creators.length > 0) jobAgents.push(shuffle(creators)[0]);
-  if (pricers.length > 0) jobAgents.push(shuffle(pricers)[0]);
+  if (pricers.length > 0) {
+    const shuffled = shuffle(pricers);
+    jobAgents.push(...shuffled.slice(0, Math.min(PRICERS_PER_TICK, shuffled.length)));
+  }
   if (traders.length > 0) jobAgents.push(shuffle(traders)[0]);
 
   // Skip job agents when there's nothing actionable — saves LLM calls
   const now2 = Date.now();
   const activeMarkets = state.getActiveMarkets();
   const hasActiveMarkets = activeMarkets.length > 0;
-  const hasUnpricedMarkets = activeMarkets.some((m) => m.fairValue === null && m.apiMarketId);
+  // Markets needing attention: no price, stale oracle, or no orders on-chain
+  const hasNeedsAttentionMarkets = activeMarkets.some((m) =>
+    m.apiMarketId && (
+      m.fairValue === null ||
+      (m.oracleUpdatedAt && m.fairValue !== null && now2 - (m.oracleUpdatedAt || 0) < 5 * 60_000)
+    )
+  );
   const hasRecentNews = state.getRecentNews(3).some((n) => now2 - n.timestamp < 15 * 60_000);
 
   const filteredJobAgents = jobAgents.filter((a) => {
@@ -92,10 +101,8 @@ async function runTick(): Promise<void> {
     if (a.role === "trader" && !hasActiveMarkets && !hasRecentNews && !a.directive) {
       return false;
     }
-    // On odd ticks, skip pricer/trader if all markets are already priced and no breaking news
-    // This halves their frequency when things are calm
+    // On odd ticks, skip trader if no recent news (but pricers always run — order books need coverage)
     if (tickCount % 2 === 1 && !a.directive) {
-      if (a.role === "pricer" && !hasUnpricedMarkets && !hasRecentNews) return false;
       if (a.role === "trader" && !hasRecentNews) return false;
     }
     return true;
