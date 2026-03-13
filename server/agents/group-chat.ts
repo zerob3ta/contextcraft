@@ -131,7 +131,22 @@ export function getAgentConvictions(agentId: string): Conviction[] {
  * Called each scheduler tick. Picks 3-4 agents to speak, runs them through LLM,
  * broadcasts messages, checks for conviction-driven directives.
  */
-export async function runGroupChatTick(): Promise<void> {
+/**
+ * Run magnetism separately (before concurrent phase) so locations
+ * are settled before both job agents and chat start.
+ */
+export function runMagnetismTick(): void {
+  const agents = Array.from(state.agents.values());
+  const now = Date.now();
+  const available = agents.filter(
+    (a) => a.cooldownUntil <= now && !(a.directive && a.directiveUntil > now)
+  );
+  if (available.length > 0) {
+    updateAgentMagnetism(available);
+  }
+}
+
+export async function runGroupChatTick(excludeIds?: Set<string>): Promise<void> {
   // Skip chat when agents are sleeping (no viewers)
   if (!isAgentAwake()) return;
 
@@ -168,17 +183,16 @@ export async function runGroupChatTick(): Promise<void> {
     }
   }
 
-  // Build available pool (not on directive, not on cooldown)
+  // Build available pool (not on directive, not on cooldown, not doing job duty this tick)
   const agents = Array.from(state.agents.values());
   const now = Date.now();
   const available = agents.filter(
-    (a) => a.cooldownUntil <= now && !(a.directive && a.directiveUntil > now)
+    (a) => a.cooldownUntil <= now &&
+           !(a.directive && a.directiveUntil > now) &&
+           !(excludeIds && excludeIds.has(a.id))
   );
 
   if (available.length === 0) return;
-
-  // Magnetism: attract agents to buildings based on recent events
-  updateAgentMagnetism(available);
 
   // Select speakers from all occupied buildings, weighted by occupancy
   const speakers = selectSpeakersAcrossBuildings(available, SPEAKERS_PER_TICK);

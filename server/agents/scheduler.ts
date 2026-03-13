@@ -5,7 +5,7 @@ import { callMinimax, parseJsonAction } from "./brain";
 import { buildSystemPrompt, buildUserPrompt, buildPortfolioReviewSystemPrompt, buildPortfolioReviewPrompt } from "./prompts";
 import { validateAction, clampTradeSize, type AgentAction } from "./actions";
 import { draftMarket, type MarketDraft } from "../market/creator";
-import { runGroupChatTick, notifyBuildingEvent } from "./group-chat";
+import { runGroupChatTick, runMagnetismTick, notifyBuildingEvent } from "./group-chat";
 import { isContextEnabled } from "../context-api/client";
 import { submitMarket, canCreateMarket } from "../context-api/markets";
 import { placePricingOrders, placeTrade, cancelOrders } from "../context-api/trading";
@@ -128,11 +128,21 @@ async function runTick(): Promise<void> {
   const allNames = [...jobNames, ...reviewNames];
   console.log(`[Tick] ${allNames.join(", ")} + conversations`);
 
+  // Settle agent locations BEFORE concurrent phase — magnetism moves happen first
+  // so job agents and chat both see stable locations
+  runMagnetismTick();
+
+  // Exclude job + review agents from chat this tick (they're busy working)
+  const busyIds = new Set([
+    ...filteredJobAgents.map((a) => a.id),
+    ...reviewAgents.map((a) => a.id),
+  ]);
+
   // Run job agents + portfolio reviews + conversation system concurrently
   await Promise.allSettled([
     ...filteredJobAgents.map((a) => runJobAgent(a.id)),
     ...reviewAgents.map((a) => runPortfolioReview(a.id)),
-    runGroupChatTick(),
+    runGroupChatTick(busyIds),
   ]);
 }
 
