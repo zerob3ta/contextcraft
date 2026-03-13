@@ -39,6 +39,23 @@ export async function getJobGrounding(
   topic: string,
   marketQuestion?: string,
 ): Promise<string> {
+  // Skip grounding for pricers/traders when analyst odds exist for the target market
+  // Analyst odds subsume oracle + grounding — saves ~40% prompt tokens
+  if ((role === "pricer" || role === "trader") && marketQuestion) {
+    const markets = state.getActiveMarkets();
+    const targetMarket = markets.find((m) =>
+      m.question.toLowerCase() === marketQuestion.toLowerCase() ||
+      m.question.toLowerCase().includes(marketQuestion.toLowerCase().slice(0, 40))
+    );
+    if (targetMarket?.analystOdds && Date.now() - targetMarket.analystOdds.computedAt < 15 * 60_000) {
+      // Fresh analyst odds exist — skip expensive grounding pipeline
+      return "";
+    }
+  }
+
+  // Analysts do their own deterministic computation — never need grounding
+  if (role === "analyst") return "";
+
   const parts: string[] = [];
 
   // Step 1: Check what local context we already have

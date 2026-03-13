@@ -39,14 +39,12 @@ function inferOutcomeStr(
 
 const BALANCE_SYNC_INTERVAL_MS = 30_000; // 30s
 const MARKET_SYNC_INTERVAL_MS = 60_000; // 60s
-const TOPIC_SEARCH_INTERVAL_MS = 120_000; // 2min — search based on chat topics
 const ORACLE_SYNC_INTERVAL_MS = 90_000; // 90s — oracle + quotes for active markets
 const EXPOSURE_CHECK_INTERVAL_MS = 45_000; // 45s — check resolution status of markets agents have positions in
 const STALE_ORDER_SWEEP_INTERVAL_MS = 120_000; // 2min — cancel orders far from fair value
 
 let balanceSyncTimer: ReturnType<typeof setInterval> | null = null;
 let marketSyncTimer: ReturnType<typeof setInterval> | null = null;
-let topicSearchTimer: ReturnType<typeof setInterval> | null = null;
 let oracleSyncTimer: ReturnType<typeof setInterval> | null = null;
 let exposureCheckTimer: ReturnType<typeof setInterval> | null = null;
 let staleOrderSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -83,15 +81,13 @@ export function startSync(): void {
 
   // Initial sync after a short delay
   setTimeout(() => syncBalances(), 5_000);
-  setTimeout(() => syncMarkets(), 10_000);
-  setTimeout(() => searchChatTopics(), 30_000);
+  setTimeout(() => syncBigBoard(), 10_000);
   setTimeout(() => syncOracleData(), 20_000);
   setTimeout(() => checkExposedMarkets(), 15_000);
   setTimeout(() => sweepStaleOrders(), 60_000); // first sweep after 1 min
 
   balanceSyncTimer = setInterval(syncBalances, BALANCE_SYNC_INTERVAL_MS);
-  marketSyncTimer = setInterval(syncMarkets, MARKET_SYNC_INTERVAL_MS);
-  topicSearchTimer = setInterval(searchChatTopics, TOPIC_SEARCH_INTERVAL_MS);
+  marketSyncTimer = setInterval(syncBigBoard, MARKET_SYNC_INTERVAL_MS);
   oracleSyncTimer = setInterval(syncOracleData, ORACLE_SYNC_INTERVAL_MS);
   exposureCheckTimer = setInterval(checkExposedMarkets, EXPOSURE_CHECK_INTERVAL_MS);
   staleOrderSweepTimer = setInterval(sweepStaleOrders, STALE_ORDER_SWEEP_INTERVAL_MS);
@@ -100,7 +96,6 @@ export function startSync(): void {
 export function stopSync(): void {
   if (balanceSyncTimer) { clearInterval(balanceSyncTimer); balanceSyncTimer = null; }
   if (marketSyncTimer) { clearInterval(marketSyncTimer); marketSyncTimer = null; }
-  if (topicSearchTimer) { clearInterval(topicSearchTimer); topicSearchTimer = null; }
   if (oracleSyncTimer) { clearInterval(oracleSyncTimer); oracleSyncTimer = null; }
   if (exposureCheckTimer) { clearInterval(exposureCheckTimer); exposureCheckTimer = null; }
   if (staleOrderSweepTimer) { clearInterval(staleOrderSweepTimer); staleOrderSweepTimer = null; }
@@ -122,7 +117,13 @@ async function syncBalances(): Promise<void> {
     try {
       // Fetch balance
       const balance = await client.portfolio.balance();
-      agent.usdcBalance = parseFloat(String(balance?.usdc?.balance ?? "0"));
+      const rawBal = parseFloat(String(balance?.usdc?.balance ?? "0"));
+      const newBal = rawBal / 1e6;
+      if (newBal < 1 && (agent.usdcBalance ?? 0) > 100) {
+        console.warn(`[Sync] ${agentCfg.id}: balance dropped ${agent.usdcBalance?.toFixed(0)} → ${newBal.toFixed(2)} (raw: ${rawBal}) — keeping old`);
+      } else {
+        agent.usdcBalance = newBal;
+      }
 
       // Fetch positions
       const portfolio = await client.portfolio.get();
@@ -142,63 +143,102 @@ async function syncBalances(): Promise<void> {
 }
 
 /**
- * Discover active markets from Context Markets testnet.
- * Merges with locally tracked markets.
+ * Paginated fetch: cursor-loop through all markets of a given status.
+ * Returns every market — no hardcoded limits.
  */
-async function syncMarkets(): Promise<void> {
+async function fetchAllMarkets(client: ReturnType<typeof getReadClient>, status: "active" | "pending" | "resolved"): Promise<Array<Record<string, unknown>>> {
+  if (!client) return [];
+  const all: Array<Record<string, unknown>> = [];
+  let cursor: string | undefined;
+  do {
+    const res = await client.markets.list({
+      status,
+      limit: 50,
+      sortBy: "new",
+      ...(cursor ? { cursor } : {}),
+    });
+    const markets = (res as { markets?: unknown[] })?.markets ?? [];
+    all.push(...(markets as Array<Record<string, unknown>>));
+    cursor = (res as { cursor?: string | null })?.cursor ?? undefined;
+  } while (cursor);
+  return all;
+}
+
+/**
+ * Big Board sync: exhaustive paginated fetch of ALL active + pending markets.
+ * Replaces the old multi-query syncMarkets() that missed markets due to hardcoded limits.
+ */
+async function syncBigBoard(): Promise<void> {
   if (isCircuitBroken()) return;
 
   const client = getReadClient();
   if (!client) return;
 
   try {
-    // Fetch markets with multiple strategies — cast a wide net across the testnet
-    const [defaultResult, trendingResult, recentResult, pendingResult, resolvedResult] = await Promise.allSettled([
-      client.markets.list({ status: "active", limit: 50 }),
-      client.markets.list({ status: "active", limit: 30, sortBy: "volume" }),
-      client.markets.list({ status: "active", limit: 30, sortBy: "new" }),
-      client.markets.list({ status: "pending", limit: 20 }),
-      client.markets.list({ status: "resolved", limit: 20 }),
+    // Paginated fetch — gets EVERY active, pending, AND resolved market
+    const [active, pending, resolved] = await Promise.all([
+      fetchAllMarkets(client, "active"),
+      fetchAllMarkets(client, "pending"),
+      fetchAllMarkets(client, "resolved"),
     ]);
 
-    const defaultMarkets = defaultResult.status === "fulfilled" ? (defaultResult.value?.markets ?? []) : [];
-    const trendingMarkets = trendingResult.status === "fulfilled" ? (trendingResult.value?.markets ?? []) : [];
-    const recentMarkets = recentResult.status === "fulfilled" ? (recentResult.value?.markets ?? []) : [];
-    const pendingMarkets = pendingResult.status === "fulfilled" ? (pendingResult.value?.markets ?? []) : [];
-    const resolvedMarkets = resolvedResult.status === "fulfilled" ? (resolvedResult.value?.markets ?? []) : [];
+    // Build set of resolved market IDs to exclude from active list
+    const resolvedIds = new Set(resolved.map((m) => (m as { id?: string }).id).filter(Boolean));
 
-    // Merge and deduplicate
+    // Dedup by market ID, excluding resolved
     const seen = new Set<string>();
-    const apiMarkets: typeof defaultMarkets = [];
-    for (const m of [...defaultMarkets, ...trendingMarkets, ...recentMarkets, ...pendingMarkets, ...resolvedMarkets]) {
-      if (!seen.has(m.id)) {
-        seen.add(m.id);
-        apiMarkets.push(m);
-      }
-    }
+    const apiMarkets = [...active, ...pending].filter((m) => {
+      const id = (m as { id?: string }).id;
+      if (!id || seen.has(id)) return false;
+      if (resolvedIds.has(id)) return false; // resolved on-chain
+      seen.add(id);
+      return true;
+    });
+
+    console.log(`[BigBoard] Synced ${active.length} active + ${pending.length} pending - ${resolvedIds.size} resolved = ${apiMarkets.length} live markets`);
 
     let newCount = 0;
+    let expiredSkipped = 0;
     for (const m of apiMarkets) {
-      const question = m.question || m.shortQuestion || m.id;
-      const yesPrice = m.outcomePrices?.find((op) => op.outcomeIndex === 0);
+      // Type-safe access — SDK returns typed objects but we store as Record<string, unknown>
+      const mAny = m as Record<string, any>;
+      const mId = mAny.id as string;
+      const question = (mAny.question || mAny.shortQuestion || mId) as string;
+      const outcomePrices = mAny.outcomePrices as Array<{ outcomeIndex: number; lastPrice?: number; bestBid?: number | null; bestAsk?: number | null }> | undefined;
+      const yesPrice = outcomePrices?.find((op) => op.outcomeIndex === 0);
       // Debug price data (only when values look wrong — > 1.0 after scaling)
       if (yesPrice?.lastPrice && yesPrice.lastPrice / 1_000_000 > 1.0) {
         console.log(`[Sync:Price:WARN] "${question.slice(0, 70)}" lastPrice=${yesPrice.lastPrice} → ${yesPrice.lastPrice / 1_000_000} (>1.0!)`);
       }
       // lastPrice is in raw units (PRICE_MULTIPLIER=10000, so 65¢ = 650000): divide by 1M for 0-1
       const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
+      // bestBid/bestAsk from outcomePrices — in same raw units, convert to cents
+      const apiBestBid = yesPrice?.bestBid != null ? Math.round(yesPrice.bestBid / 10_000) : null;
+      const apiBestAsk = yesPrice?.bestAsk != null ? Math.round(yesPrice.bestAsk / 10_000) : null;
 
       // Read resolution status directly from SDK market object
-      const apiStatus = m.status;  // "active" | "pending" | "resolved" | "closed"
-      const resolutionStatus = m.resolutionStatus;  // "none" | "pending" | "resolved"
-      const proposedAt = m.proposedAt;
-      const resolvedAt = m.resolvedAt;
-      const apiOutcome = m.outcome;
-      const payoutPcts = m.payoutPcts;
-      const deadline = (m as Record<string, unknown>).deadline as string | undefined;
+      const apiStatus = mAny.status as string | undefined;
+      const resolutionStatus = mAny.resolutionStatus as string | undefined;
+      const proposedAt = mAny.proposedAt as string | undefined;
+      const resolvedAt = mAny.resolvedAt as string | undefined;
+      const apiOutcome = mAny.outcome as number | null | undefined;
+      const payoutPcts = mAny.payoutPcts as number[] | undefined;
+      const deadline = mAny.deadline as string | undefined;
+
+      // Skip expired markets — deadline has passed, event is over
+      if (deadline && new Date(deadline).getTime() < Date.now()) {
+        expiredSkipped++;
+        continue;
+      }
+      // Also skip markets with executableAt in the past (resolution window open = event is over)
+      const executableAt = mAny.executableAt as string | undefined;
+      if (executableAt && new Date(executableAt).getTime() < Date.now()) {
+        expiredSkipped++;
+        continue;
+      }
 
       // Check if we already track this market
-      const existing = state.getMarketByApiId(m.id);
+      const existing = state.getMarketByApiId(mId);
       if (existing) {
         // Log resolution fields for debugging
         if (apiStatus !== "active" || resolutionStatus !== "none") {
@@ -213,6 +253,10 @@ async function syncMarkets(): Promise<void> {
         if (apiOutcome !== undefined) existing.outcome = apiOutcome;
         if (payoutPcts) existing.payoutPcts = payoutPcts;
         if (deadline) existing.deadline = deadline;
+
+        // Update best bid/ask from API orderbook data
+        if (apiBestBid !== null) existing.bestBid = apiBestBid;
+        if (apiBestAsk !== null) existing.bestAsk = apiBestAsk;
 
         // Detect status transitions — proposals are BREAKING, resolution is normal
         if (apiStatus && apiStatus !== prevStatus) {
@@ -264,29 +308,58 @@ async function syncMarkets(): Promise<void> {
 
       // Add as external market
       const localId = state.addExternalMarket({
-        apiMarketId: m.id,
+        apiMarketId: mId,
         question,
         fairValue,
       });
 
       if (localId) {
-        // Store deadline from API
-        const mDeadline = (m as Record<string, unknown>).deadline as string | undefined;
-        if (mDeadline) {
-          const market = state.markets.get(localId);
-          if (market) market.deadline = mDeadline;
+        // Store all API metadata on newly discovered markets
+        const market = state.markets.get(localId);
+        if (market) {
+          // Log non-active markets for debugging
+          if (resolutionStatus && resolutionStatus !== "none") {
+            console.log(`[BigBoard] New market ${localId} has resolution: apiStatus=${apiStatus}, resStatus=${resolutionStatus}, outcome=${apiOutcome}`);
+          }
+          if (deadline) market.deadline = deadline;
+          if (apiStatus) market.apiStatus = apiStatus as Market["apiStatus"];
+          if (resolutionStatus) market.resolutionStatus = resolutionStatus as Market["resolutionStatus"];
+          if (proposedAt) market.proposedAt = new Date(proposedAt).getTime();
+          if (resolvedAt) market.resolvedAt = new Date(resolvedAt).getTime();
+          if (apiOutcome !== undefined) market.outcome = apiOutcome;
+          if (payoutPcts) market.payoutPcts = payoutPcts;
+          if (apiBestBid !== null) market.bestBid = apiBestBid;
+          if (apiBestAsk !== null) market.bestAsk = apiBestAsk;
         }
         newCount++;
       }
     }
 
-    if (newCount > 0) {
-      console.log(`[Context Sync] Discovered ${newCount} new markets from testnet`);
-      broadcast({
-        type: "markets_synced",
-        count: state.getActiveMarkets().length,
-      });
+    if (newCount > 0 || expiredSkipped > 0) {
+      console.log(`[BigBoard] Discovered ${newCount} new markets, skipped ${expiredSkipped} expired`);
     }
+
+    // Mark locally-tracked markets that are in the resolved list
+    let markedResolved = 0;
+    for (const market of state.getActiveMarkets()) {
+      if (!market.apiMarketId) continue;
+      if (market.apiStatus === "resolved" || market.apiStatus === "closed") continue;
+      if (!resolvedIds.has(market.apiMarketId)) continue;
+      market.apiStatus = "resolved";
+      market.resolutionStatus = "resolved";
+      markedResolved++;
+    }
+    if (markedResolved > 0) {
+      console.log(`[BigBoard] Marked ${markedResolved} markets as resolved`);
+    }
+
+    // Always broadcast board sync with coverage stats
+    const stats = state.getBoardStats();
+    broadcast({
+      type: "board_sync",
+      count: stats.total,
+      stats,
+    });
 
     // Auto-cancel all agent orders on resolving/resolved markets
     const resolvingMarkets = state.getActiveMarkets().filter((m) =>
@@ -603,6 +676,20 @@ async function syncOracleData(): Promise<void> {
         market.bestBid = quotes.yes?.bid ?? null;
         market.bestAsk = quotes.yes?.ask ?? null;
         market.lastTradePrice = quotes.yes?.last ?? null;
+
+        // Bootstrap fairValue from quote data if market was unpriced
+        if (market.fairValue === null) {
+          let derived: number | null = null;
+          if (quotes.yes?.bid != null && quotes.yes?.ask != null) {
+            derived = (quotes.yes.bid + quotes.yes.ask) / 2 / 100;
+          } else if (quotes.yes?.last != null) {
+            derived = quotes.yes.last / 100;
+          }
+          if (derived !== null) {
+            derived = Math.max(0.02, Math.min(0.98, derived));
+            state.updatePrice(market.id, derived, 0.06);
+          }
+        }
       }
 
       // Fetch price history — SDK returns { prices: [{ time, price }] }
@@ -627,125 +714,8 @@ async function syncOracleData(): Promise<void> {
   }
 }
 
-/**
- * Every 2 minutes, extract trending topics from recent chat + news and search
- * Context Markets for related markets. This lets agents trade on topics they're
- * already discussing (e.g. Iran, Bitcoin, elections) without waiting for news.
- */
-const searchedTopics = new Set<string>(); // avoid re-searching same topics
-const SEARCHED_TOPIC_TTL_MS = 10 * 60_000; // forget after 10min
-let searchedTopicTimers: ReturnType<typeof setTimeout>[] = [];
-
-async function searchChatTopics(): Promise<void> {
-  if (isCircuitBroken()) return;
-
-  const client = getReadClient();
-  if (!client) return;
-
-  // Gather text from recent chat + news
-  const recentChat = state.getRecentSocialContext(15);
-  const recentNews = state.getRecentNews(10);
-  const allText = [
-    ...recentChat.map((l) => l),
-    ...recentNews.map((n) => n.headline),
-  ].join(" ");
-
-  // Extract unique searchable topics
-  const topics = extractTopicsFromText(allText);
-  const newTopics = topics.filter((t) => !searchedTopics.has(t));
-
-  if (newTopics.length === 0) return;
-
-  // Search for up to 5 new topics per cycle
-  for (const topic of newTopics.slice(0, 5)) {
-    searchedTopics.add(topic);
-    // Auto-expire after TTL
-    const timer = setTimeout(() => searchedTopics.delete(topic), SEARCHED_TOPIC_TTL_MS);
-    searchedTopicTimers.push(timer);
-
-    try {
-      const result = await client.markets.search({ q: topic, limit: 5 });
-      const found = result?.markets ?? [];
-
-      let newCount = 0;
-      for (const m of found) {
-        if (state.getMarketByApiId(m.id)) continue;
-        if (!m.status || m.status !== "active") continue;
-
-        const question = m.question || m.shortQuestion || m.id;
-        const yesPrice = m.outcomePrices?.find((op: { outcomeIndex: number }) => op.outcomeIndex === 0);
-        const fairValue = yesPrice?.lastPrice ? yesPrice.lastPrice / 1_000_000 : null;
-
-        const localId = state.addExternalMarket({
-          apiMarketId: m.id,
-          question,
-          fairValue,
-        });
-
-        if (localId) newCount++;
-      }
-
-      if (newCount > 0) {
-        console.log(`[Context Search] Topic "${topic}" → ${newCount} new markets`);
-        broadcast({ type: "markets_synced", count: state.getActiveMarkets().length });
-      }
-
-      recordSuccess();
-    } catch {
-      recordFailure();
-    }
-  }
-}
-
-/**
- * Extract searchable topics from a block of text (chat + news combined).
- */
-function extractTopicsFromText(text: string): string[] {
-  const t = text.toLowerCase();
-  const found: string[] = [];
-
-  const topicPatterns: [RegExp, string][] = [
-    [/\biran\b/, "iran"],
-    [/\bbitcoin|btc\b/, "bitcoin"],
-    [/\bethereum|eth\b/, "ethereum"],
-    [/\bsolana\b/, "solana"],
-    [/\btrump\b/, "trump"],
-    [/\bbiden\b/, "biden"],
-    [/\belection\b/, "election"],
-    [/\bfed\b|federal reserve/, "federal reserve"],
-    [/\btariff\b/, "tariff"],
-    [/\brecession\b/, "recession"],
-    [/\binflation\b/, "inflation"],
-    [/\bnvidia\b/, "nvidia"],
-    [/\btesla\b/, "tesla"],
-    [/\bapple\b(?!.*sauce)/, "apple"],
-    [/\bgoogle\b/, "google"],
-    [/\bopenai\b|chatgpt/, "openai"],
-    [/\bspacex\b/, "spacex"],
-    [/\bukraine\b/, "ukraine"],
-    [/\brussia\b/, "russia"],
-    [/\bchina\b/, "china"],
-    [/\bisrael\b/, "israel"],
-    [/\bnorth korea\b/, "north korea"],
-    [/\bsuper bowl\b/, "super bowl"],
-    [/\bmarch madness\b|ncaa tournament/, "march madness"],
-    [/\bnba playoff\b/, "nba playoffs"],
-    [/\bworld cup\b/, "world cup"],
-    [/\bolympic\b/, "olympics"],
-    [/\bai regulation\b|ai safety/, "AI regulation"],
-    [/\brate cut\b|rate hike/, "interest rates"],
-    [/\bceasefire\b/, "ceasefire"],
-    [/\bbank.*fail\b|banking crisis/, "banking crisis"],
-  ];
-
-  for (const [regex, topic] of topicPatterns) {
-    if (regex.test(t) && !found.includes(topic)) {
-      found.push(topic);
-    }
-  }
-
-  return found;
-}
+// searchChatTopics() removed — Big Board's paginated sync fetches ALL markets,
+// making topic-based discovery unnecessary.
 
 /**
  * Search Context Markets for markets related to a news headline.

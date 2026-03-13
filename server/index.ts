@@ -5,7 +5,7 @@ import { startWsServer } from "./ws-bridge";
 import { startPoller, stopPoller } from "./signals/poller";
 import { startScheduler, stopScheduler } from "./agents/scheduler";
 import { startNPCSpawner, stopNPCSpawner } from "./agents/npcs";
-import { initializeWallets, stopTopupLoop } from "./context-api/setup";
+import { initializeWallets, resetAllAgents, stopTopupLoop } from "./context-api/setup";
 import { startSync, stopSync } from "./context-api/sync";
 import { startMarketPoller, stopMarketPoller } from "./context-api/markets";
 import { isContextEnabled } from "./context-api/client";
@@ -46,8 +46,9 @@ startPoller();
 
 // 3. Initialize Context Markets wallets (if configured)
 if (isContextEnabled()) {
-  console.log("[Context] Initializing wallets + API integration...");
-  initializeWallets()
+  console.log("[Context] Resetting agents + initializing wallets...");
+  resetAllAgents()
+    .then(() => initializeWallets())
     .then(() => {
       startSync();
       startMarketPoller();

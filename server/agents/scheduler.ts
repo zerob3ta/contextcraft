@@ -12,6 +12,10 @@ import { placePricingOrders, placeTrade, cancelOrders } from "../context-api/tra
 import { getJobGrounding } from "./grounding";
 import { executeResearch } from "./research";
 import { isAgentAwake, isScramblePhase } from "../sleep";
+import { tickBreakRotation, isOnBreak } from "./breaks";
+import { tickMarketMaker, assignUnquotedMarkets, startQuoting, notifyFill, getQuotedMarkets } from "./market-maker";
+import { isSetupComplete } from "../context-api/setup";
+import { runAnalystJob } from "./analyst";
 import type { AgentMarketDraft } from "../context-api/types";
 import type { AgentState, Market } from "../state";
 
@@ -49,17 +53,27 @@ async function runTick(): Promise<void> {
   // Pre-tick: force cancel orders for agents with open orders on resolving markets
   forceResolveCleanup();
 
+  // Tick break rotation (after cleanup, before magnetism)
+  tickBreakRotation();
+
+  // Algorithmic MM: assign unquoted markets every tick (lightweight, no API calls), requote every tick
+  assignUnquotedMarkets();
+  tickMarketMaker().catch((err) => console.error("[MM] tick error:", err));
+
   // Exclude agents on active directives from job duty (unless they have a directive to fulfill)
   const onDirective = new Set(
     agents.filter((a) => a.directive && a.directiveUntil > now).map((a) => a.id)
   );
-  const available = agents.filter((a) => a.cooldownUntil <= now && !isNPC(a.id));
+  const available = agents.filter(
+    (a) => a.cooldownUntil <= now && !isNPC(a.id) && a.role !== "bartender" && !isOnBreak(a.id)
+  );
   if (available.length === 0) return;
 
   // Split by role
   const creators = available.filter((a) => a.role === "creator");
   const pricers = available.filter((a) => a.role === "pricer");
   const traders = available.filter((a) => a.role === "trader");
+  const analysts = available.filter((a) => a.role === "analyst");
 
   // Pick agents for job duty — up to 2 pricers, 1 each for creator/trader
   const shuffle = <T>(arr: T[]) => arr.sort(() => Math.random() - 0.5);
@@ -93,13 +107,33 @@ async function runTick(): Promise<void> {
         return false; // daily API limit reached
       }
     }
-    // Skip pricer if no active markets to price (unless they have a directive)
+    // Skip pricer if no active markets at all
     if (a.role === "pricer" && !hasActiveMarkets && !a.directive) {
       return false;
+    }
+    // Skip pricer if all their assigned markets already have live quotes
+    // The algo MM handles requoting — LLM pricer is needed for initial price discovery
+    if (a.role === "pricer" && !a.directive) {
+      const myMarkets = getQuotedMarkets(a.id);
+      const needsPricing = myMarkets.some((mid) => {
+        const m = state.markets.get(mid);
+        return m && m.apiMarketId && (m.bestBid === null || m.bestAsk === null);
+      });
+      // Also run if no markets assigned yet (will get assigned this tick)
+      if (!needsPricing && myMarkets.length > 0) return false;
     }
     // Skip trader if no priced markets to trade AND no recent news to react to
     if (a.role === "trader" && !hasActiveMarkets && !hasRecentNews && !a.directive) {
       return false;
+    }
+    // Skip trader if no non-resolved markets with prices exist
+    if (a.role === "trader" && !a.directive) {
+      const hasTradeableMarkets = activeMarkets.some((m) => {
+        const isRes = m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed" ||
+          m.resolutionStatus === "pending" || m.resolutionStatus === "resolved";
+        return !isRes && m.fairValue !== null;
+      });
+      if (!hasTradeableMarkets && !hasRecentNews) return false;
     }
     // On odd ticks, skip trader if no recent news (but pricers always run — order books need coverage)
     if (tickCount % 2 === 1 && !a.directive) {
@@ -107,6 +141,9 @@ async function runTick(): Promise<void> {
     }
     return true;
   });
+
+  // Analyst scheduling: ALL available analysts every tick (they need to chew through the backlog)
+  const analystAgents = state.getMarketsNeedingAnalysis().length > 0 ? analysts : [];
 
   // Portfolio review: every Nth tick, one pricer and one trader review their book
   // During scramble phase (wake-up), ALL pricers/traders review simultaneously
@@ -132,23 +169,29 @@ async function runTick(): Promise<void> {
 
   const jobNames = filteredJobAgents.map((a) => `${a.name}[job]`);
   const reviewNames = reviewAgents.map((a) => `${a.name}[review]`);
-  const allNames = [...jobNames, ...reviewNames];
+  const analystNames = analystAgents.map((a) => `${a.name}[analyst]`);
+  const allNames = [...jobNames, ...reviewNames, ...analystNames];
+  const boardStats = state.getBoardStats();
+  console.log(`[Tick] Board: ${boardStats.total} total, ${boardStats.analyzed} analyzed, ${boardStats.priced} priced, ${boardStats.traded} traded`);
   console.log(`[Tick] ${allNames.join(", ")} + conversations`);
 
   // Settle agent locations BEFORE concurrent phase — magnetism moves happen first
   // so job agents and chat both see stable locations
   runMagnetismTick();
 
-  // Exclude job + review agents from chat this tick (they're busy working)
+  // Exclude job + review + analyst agents from chat this tick (they're busy working)
+  // Break agents CAN still participate in group chat (NOT added to busyIds)
   const busyIds = new Set([
     ...filteredJobAgents.map((a) => a.id),
     ...reviewAgents.map((a) => a.id),
+    ...analystAgents.map((a) => a.id),
   ]);
 
-  // Run job agents + portfolio reviews + conversation system concurrently
+  // Run job agents + portfolio reviews + analyst + conversation system concurrently
   await Promise.allSettled([
     ...filteredJobAgents.map((a) => runJobAgent(a.id)),
     ...reviewAgents.map((a) => runPortfolioReview(a.id)),
+    ...analystAgents.map((a) => runAnalystJob(a.id).then(() => state.setAgentCooldown(a.id, 5_000))),
     runGroupChatTick(busyIds),
   ]);
 }
@@ -268,6 +311,20 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       const market = state.markets.get(action.marketId);
       if (!market) break;
 
+      // Block re-pricing markets that already have live quotes (algo MM handles requotes)
+      // But allow initial pricing if the market has no bid/ask yet
+      const alreadyQuoted = getQuotedMarkets(agentId);
+      if (alreadyQuoted.includes(action.marketId) && market.bestBid !== null && market.bestAsk !== null) {
+        console.log(`[Scheduler] BLOCKED re-pricing ${action.marketId} by ${agent.name} — already quoted, algo MM handles requotes`);
+        break;
+      }
+
+      // Block phantom markets (no on-chain backing)
+      if (isContextEnabled() && !market.apiMarketId) {
+        console.log(`[Scheduler] BLOCKED pricing on phantom market ${action.marketId} (no apiMarketId)`);
+        break;
+      }
+
       // Hard block: do not price resolving/resolved markets
       if (market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed" ||
           market.resolutionStatus === "pending" || market.resolutionStatus === "resolved") {
@@ -283,7 +340,7 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       broadcast({ type: "agent_move", agentId, destination: "exchange", reason: "Pricing" });
 
       // Use real API if available, otherwise local state
-      if (isContextEnabled() && market.apiMarketId) {
+      if (isContextEnabled() && market.apiMarketId && isSetupComplete()) {
         const fairCents = Math.round(action.fairValue * 100);
         const spreadCents = Math.round(action.spread * 100);
         const success = await placePricingOrders(agentId, action.marketId, fairCents, spreadCents);
@@ -301,14 +358,25 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
         notifyBuildingEvent("pit");
       }
 
+      // Register with algorithmic MM — it handles requoting from here
+      if (isContextEnabled() && market.apiMarketId) {
+        startQuoting(agentId, action.marketId);
+      }
+
       // Log to social context so other agents can react
       const cents = Math.round(action.fairValue * 100);
       const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
       state.addAction(agentId, "priced", `${shortQ} at ${cents}¢`);
       state.setAgentCooldown(agentId, 8_000);
 
-      // Return to lounge after cooldown
-      returnToLounge(agentId, 8_000);
+      // Record pricing event for trader awareness
+      state.addPricingEvent({
+        agentId,
+        marketId: action.marketId,
+        fairValue: action.fairValue,
+        spread: action.spread,
+        ts: Date.now(),
+      });
       break;
     }
 
@@ -316,15 +384,18 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       const market = state.markets.get(action.marketId);
       if (!market || market.fairValue === null) break;
 
+      // Block phantom markets (no on-chain backing)
+      if (isContextEnabled() && !market.apiMarketId) {
+        console.log(`[Scheduler] BLOCKED trade on phantom market ${action.marketId} (no apiMarketId)`);
+        break;
+      }
+
       const isResolvingMarket = market.apiStatus === "pending" || market.apiStatus === "resolved" || market.apiStatus === "closed" ||
           market.resolutionStatus === "pending" || market.resolutionStatus === "resolved";
 
-      // Hard block: do not BUY on resolving/resolved markets — but ALLOW SELLS (closing positions)
-      if (isResolvingMarket && action.direction !== "sell") {
-        console.log(`[Scheduler] BLOCKED buy on resolving ${action.marketId}`);
-        if (isContextEnabled() && market.apiMarketId) {
-          cancelOrders(agentId, action.marketId).catch(() => {});
-        }
+      // Hard block: do not trade on resolving/resolved markets at all — positions are worthless
+      if (isResolvingMarket) {
+        console.log(`[Scheduler] BLOCKED trade on resolved ${action.marketId}`);
         break;
       }
 
@@ -334,44 +405,44 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       state.moveAgent(agentId, "pit");
       broadcast({ type: "agent_move", agentId, destination: "pit", reason: dir === "sell" ? "Selling" : "Trading" });
 
-      if (isContextEnabled() && market.apiMarketId) {
+      if (isContextEnabled() && market.apiMarketId && isSetupComplete()) {
         const success = await placeTrade(agentId, action.marketId, action.side, size, dir);
+        // Record cooldown regardless of success — prevents looping on failed trades
+        state.recordTradeCooldown(agentId, action.marketId);
+        if (success) {
+          // Notify all pricers quoting this market — they got filled, need to requote
+          for (const [, a] of state.agents) {
+            if (a.role === "pricer") notifyFill(a.id, action.marketId, action.side);
+          }
+        }
         if (!success) {
-          // Fall back to local
-          const price = action.side === "YES"
-            ? market.fairValue + (market.spread || 0.04) / 2
-            : 1 - market.fairValue + (market.spread || 0.04) / 2;
-          const localSize = Math.min(size, 100);
-          const cost = Math.round(localSize * price * 100) / 100;
-          state.addTrade(action.marketId, agentId, action.side, dir === "sell" ? -localSize : localSize, price);
-          broadcast({
-            type: "trade_executed", agentId, marketId: action.marketId,
-            side: action.side, size: localSize,
-            price: Math.round(price * 100) / 100, building: "pit", question: market.question,
-          });
-          notifyBuildingEvent("pit");
-          const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
-          state.addAction(agentId, `${dir === "sell" ? "sold" : "bought"} ${action.side}`, `$${cost} on ${shortQ}`);
+          // Log failure — do NOT fall back to local execution (LLM needs to know order was rejected)
+          const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
+          state.addAction(agentId, "order_failed", `${agent.name} order rejected — ${dir} ${action.side} "${shortQ}"`);
+          console.log(`[Scheduler] Trade FAILED for ${agent.name} on ${action.marketId}`);
         }
       } else {
+        // Offline mode — instant fill
         const price = action.side === "YES"
           ? market.fairValue + (market.spread || 0.04) / 2
           : 1 - market.fairValue + (market.spread || 0.04) / 2;
         const localSize = Math.min(size, 100);
-        const cost = Math.round(localSize * price * 100) / 100;
+        const priceCents = Math.round(price * 100);
+        const agentName = agent.name;
+        const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
         state.addTrade(action.marketId, agentId, action.side, dir === "sell" ? -localSize : localSize, price);
+        state.logTrade({ agentId, marketId: action.marketId, type: "execution", side: action.side, direction: dir, shares: localSize, priceCents });
+        state.addAction(agentId, "execution", `${agentName} ${dir === "sell" ? "sold" : "bought"} ${localSize} shares ${action.side} "${shortQ}" at ${priceCents}¢`);
         broadcast({
           type: "trade_executed", agentId, marketId: action.marketId,
           side: action.side, size: localSize,
           price: Math.round(price * 100) / 100, building: "pit", question: market.question,
+          tradeType: "execution", direction: dir,
         });
         notifyBuildingEvent("pit");
-        const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
-        state.addAction(agentId, `${dir === "sell" ? "sold" : "bought"} ${action.side}`, `$${cost} on ${shortQ}`);
       }
 
       state.setAgentCooldown(agentId, 6_000);
-      returnToLounge(agentId, 6_000);
       break;
     }
 
@@ -382,7 +453,14 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       if (isContextEnabled() && market.apiMarketId) {
         await cancelOrders(agentId, action.marketId);
       }
-      state.addAction(agentId, "cancelled orders", market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70));
+      const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
+      state.logTrade({ agentId, marketId: action.marketId, type: "cancel", side: "YES", direction: "buy", shares: 0, priceCents: 0, reason: "agent requested" });
+      state.addAction(agentId, "cancel", `${agent.name} cancelled orders on "${shortQ}"`);
+      broadcast({
+        type: "trade_executed", agentId, marketId: action.marketId,
+        side: "YES", size: 0, price: 0, building: "pit", question: market.question,
+        tradeType: "cancel",
+      });
       break;
     }
 
@@ -399,6 +477,57 @@ async function processAction(agentId: string, action: AgentAction): Promise<void
       agent.researchQuery = action.query;
       state.addAction(agentId, "researched", `${action.source}: ${action.query.slice(0, 80)}`);
       state.setAgentCooldown(agentId, 4_000);
+      break;
+    }
+
+    case "add_idea": {
+      if (!agent.marketIdeasBacklog) agent.marketIdeasBacklog = [];
+      // Expire items older than 30 min
+      const cutoff = Date.now() - 30 * 60_000;
+      agent.marketIdeasBacklog = agent.marketIdeasBacklog.filter((i) => i.addedAt > cutoff);
+      // Cap at 5 items
+      if (agent.marketIdeasBacklog.length < 5) {
+        agent.marketIdeasBacklog.push({
+          idea: action.idea,
+          addedAt: Date.now(),
+          source: action.source,
+        });
+        console.log(`[Job:${agent.name}] Added idea: ${action.idea.slice(0, 60)}`);
+        state.addAction(agentId, "noted idea", action.idea.slice(0, 80));
+      }
+      // No cooldown, no movement
+      break;
+    }
+
+    case "post_analysis": {
+      const market = state.markets.get(action.marketId);
+      if (!market) break;
+
+      state.updateAnalystOdds(action.marketId, {
+        probability: action.probability,
+        confidence: action.confidence,
+        method: action.method,
+        category: action.category,
+        summary: action.summary,
+        analystId: agentId,
+        computedAt: Date.now(),
+      });
+
+      broadcast({
+        type: "analyst_report",
+        agentId,
+        agentName: agent.name,
+        marketId: action.marketId,
+        question: market.question,
+        probability: action.probability,
+        confidence: action.confidence,
+        summary: action.summary,
+        building: agent.location,
+      });
+
+      const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
+      state.addAction(agentId, "analyzed", `${shortQ} at ${action.probability}% (${action.confidence})`);
+      state.setAgentCooldown(agentId, 10_000);
       break;
     }
 
@@ -425,7 +554,6 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
   if (!result || typeof result === "string") {
     console.log(`[Creator:${agent.name}] Draft rejected (no structured market) for topic: ${topic.slice(0, 60)}`);
     state.setAgentCooldown(agentId, 20_000);
-    returnToLounge(agentId, 20_000);
     return;
   }
 
@@ -434,7 +562,6 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
   if (state.isDuplicateMarket(question)) {
     console.log(`[Creator:${agent.name}] Duplicate market: ${question.slice(0, 80)}`);
     state.setAgentCooldown(agentId, 10_000);
-    returnToLounge(agentId, 10_000);
     return;
   }
 
@@ -453,32 +580,17 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
       timezone: "America/New_York",
     };
 
-    // Non-blocking submit — goes to background poller
+    // Submit to Context API — poller handles finalization + local market creation
     const submissionId = await submitMarket(agentId, draft, question);
     if (submissionId) {
       console.log(`[Creator:${agent.name}] Submitted to Context API: ${question.slice(0, 80)} (${result.endTimeHours}h, ${draft.evidenceMode})`);
-      const market = state.createMarket(question, agentId);
       state.lastMarketCreatedAt = Date.now();
-      broadcast({
-        type: "market_spawning",
-        marketId: market.id,
-        question: market.question,
-        creator: agentId,
-        building: "workshop",
-      });
-      notifyBuildingEvent("workshop");
-      notifyBuildingEvent("exchange");
-      state.addAction(agentId, "submitted market", question.slice(0, 80));
-      announceNewMarket(agentId, question);
+      // Don't create local market yet — wait for poller to confirm on-chain creation
+      broadcast({ type: "market_pending", agentId, question: question.slice(0, 100), building: "workshop" });
+      state.addAction(agentId, "submitted market (pending)", question.slice(0, 80));
     } else {
-      console.log(`[Creator:${agent.name}] Context API submit failed, falling back to local`);
-      const market = state.createMarket(question, agentId);
-      state.lastMarketCreatedAt = Date.now();
-      broadcast({ type: "market_spawning", marketId: market.id, question: market.question, creator: agentId, building: "workshop" });
-      notifyBuildingEvent("workshop");
-      notifyBuildingEvent("exchange");
-      state.addAction(agentId, "created market", question.slice(0, 80));
-      announceNewMarket(agentId, question);
+      console.log(`[Creator:${agent.name}] Context API submit failed`);
+      state.addAction(agentId, "market submission failed", question.slice(0, 80));
     }
   } else {
     // Local-only creation
@@ -492,7 +604,6 @@ async function runMarketCreationFlow(agentId: string, topic: string): Promise<vo
   }
 
   state.setAgentCooldown(agentId, 20_000);
-  returnToLounge(agentId, 20_000);
 }
 
 /**
@@ -536,27 +647,30 @@ function describeAction(_agent: AgentState, action: AgentAction): string {
       return `Moved to ${action.destination}`;
     case "research":
       return `Researched: ${action.query.slice(0, 80)} (${action.source})`;
+    case "add_idea":
+      return `Noted idea: ${action.idea.slice(0, 80)}`;
+    case "post_analysis": {
+      const m = state.markets.get(action.marketId);
+      return `Analyzed "${shortTitle(m?.question || "market")}" at ${action.probability}% (${action.confidence})`;
+    }
     case "idle":
       return "Observing";
   }
 }
 
-// Track sell attempts to prevent infinite sell loops on resolving markets
-const sellAttempts = new Map<string, number>(); // key: `${agentId}-${marketId}`
-const MAX_SELL_ATTEMPTS = 3;
 // Track cancel-sent so we don't spam the API every tick
 const cancelSent = new Set<string>(); // key: `${agentId}-${marketId}`
 
 /**
  * Pre-tick cleanup: for every agent with open orders on resolving/resolved markets,
- * immediately cancel those orders without waiting for the LLM to decide.
+ * immediately cancel those orders. No sell attempts — resolved positions are worthless.
  */
 function forceResolveCleanup(): void {
   const resolvingMarkets = new Map<string, Market>();
   for (const m of state.getActiveMarkets()) {
     if (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
         m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed") {
-      resolvingMarkets.set(m.id, m); // keyed by local ID only to avoid duplicates
+      resolvingMarkets.set(m.id, m);
     }
   }
   if (resolvingMarkets.size === 0) return;
@@ -576,45 +690,7 @@ function forceResolveCleanup(): void {
         }
       }
     }
-
-    // Set directive to sell losing positions on resolving markets (max 3 attempts)
-    if (agent.positions && (agent.role === "trader" || agent.role === "pricer")) {
-      if (agent.directive && agent.directiveUntil > Date.now()) continue; // don't override existing directive
-      for (const pos of agent.positions) {
-        const m = resolvingMarkets.get(pos.marketId);
-        if (!m || pos.size <= 0) continue;
-        const outcomeStr = m.outcome === 1 ? "YES" : m.outcome === 0 ? "NO" : null;
-        if (!outcomeStr) continue;
-        const isLosing = pos.outcome.toUpperCase() !== outcomeStr;
-        if (isLosing) {
-          const attemptKey = `${agent.id}-${m.id}`;
-          const attempts = sellAttempts.get(attemptKey) || 0;
-          if (attempts >= MAX_SELL_ATTEMPTS) {
-            // Already tried enough — stop looping
-            continue;
-          }
-          sellAttempts.set(attemptKey, attempts + 1);
-          const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
-          agent.directive = `SELL your losing ${pos.outcome.toUpperCase()} position on "${shortQ}" [${m.id}] — market resolving ${outcomeStr}`;
-          agent.directiveUntil = Date.now() + 30_000;
-          console.log(`[Scheduler:ForceCleanup] ${agent.name} DIRECTIVE: sell losing position on ${m.id} (attempt ${attempts + 1}/${MAX_SELL_ATTEMPTS})`);
-          break; // one directive at a time
-        }
-      }
-    }
   }
-}
-
-function returnToLounge(agentId: string, delayMs: number): void {
-  setTimeout(() => {
-    const agent = state.agents.get(agentId);
-    if (!agent) return;
-    // Only return if not on a new directive
-    if (agent.directive && agent.directiveUntil > Date.now()) return;
-    if (agent.location === "lounge") return;
-    state.moveAgent(agentId, "lounge");
-    broadcast({ type: "agent_move", agentId, destination: "lounge", reason: "Returning to lounge" });
-  }, delayMs);
 }
 
 /**
@@ -622,6 +698,9 @@ function returnToLounge(agentId: string, delayMs: number): void {
  * Uses directive, recent news, and market questions to decide what to search.
  */
 function extractGroundingTopic(agent: AgentState, markets: ReturnType<typeof state.getActiveMarkets>): string {
+  // Analysts do their own deterministic computation — no grounding needed
+  if (agent.role === "analyst") return "";
+
   // If agent has a directive, extract the topic from it
   if (agent.directive) {
     return agent.directive;

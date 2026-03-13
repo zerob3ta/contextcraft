@@ -43,6 +43,8 @@ export type GameEvent =
       price: number;
       building?: string;
       question?: string;
+      tradeType?: "order" | "execution" | "cancel";
+      direction?: "buy" | "sell";
     }
   | {
       type: "news_alert";
@@ -134,6 +136,39 @@ export type GameEvent =
   | {
       type: "markets_synced";
       count: number;
+    }
+  | {
+      type: "board_sync";
+      count: number;
+      stats: { total: number; analyzed: number; priced: number; traded: number };
+    }
+  | {
+      type: "board_snapshot";
+      markets: Array<{
+        id: string;
+        question: string;
+        fairValue: number | null;
+        hasAnalystOdds: boolean;
+        hasQuotes: boolean;
+        hasTrades: boolean;
+        apiStatus: string | null;
+      }>;
+      stats: { total: number; analyzed: number; priced: number; traded: number };
+    }
+  | {
+      type: "server_connected";
+    }
+  // Analyst report events
+  | {
+      type: "analyst_report";
+      agentId: string;
+      agentName: string;
+      marketId: string;
+      question: string;
+      probability: number;
+      confidence: string;
+      summary: string;
+      building?: string;
     };
 
 /** Pre-scripted demo timeline — runs on load so the town is alive immediately */

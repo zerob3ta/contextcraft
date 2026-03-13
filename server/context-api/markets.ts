@@ -239,6 +239,15 @@ async function finalizeMarketCreation(
   notifyBuildingEvent("exchange");
 
   state.addAction(pending.agentId, "created market", pending.question.slice(0, 80));
+
+  // Announce as news so pricers/traders react
+  const agentName = state.agents.get(pending.agentId)?.name || pending.agentId;
+  const shortQ = pending.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 80);
+  const headline = `New market: "${shortQ}" — created by ${agentName}. Pricers: needs fair value. Traders: watch for entry.`;
+  state.addNews({ headline, snippet: pending.question, source: "Context Markets", category: "Markets" });
+  broadcast({ type: "news_alert", headline, source: "Context Markets", severity: "normal", building: "newsroom" });
+  notifyBuildingEvent("newsroom");
+  notifyBuildingEvent("pit");
 }
 
 function broadcastCreationRejected(agentId: string, question: string, reason: string): void {

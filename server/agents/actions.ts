@@ -10,6 +10,8 @@ export type AgentAction =
   | { action: "trade"; marketId: string; side: "YES" | "NO"; size: number; direction: "buy" | "sell" }
   | { action: "cancel_orders"; marketId: string }
   | { action: "research"; query: string; source: ResearchSource }
+  | { action: "add_idea"; idea: string; source: string }
+  | { action: "post_analysis"; marketId: string; probability: number; confidence: "low" | "medium" | "high"; method: string; category: string; summary: string }
   | { action: "idle" };
 
 const VALID_BUILDINGS: Set<string> = new Set(["newsroom", "workshop", "exchange", "pit", "lounge"]);
@@ -22,6 +24,16 @@ export function validateAction(raw: unknown, role: AgentRole): AgentAction {
   if (!raw || typeof raw !== "object") return { action: "idle" };
 
   const obj = raw as Record<string, unknown>;
+
+  // Bartender can only speak or idle
+  if (role === "bartender" && obj.action !== "speak" && obj.action !== "idle") {
+    return { action: "idle" };
+  }
+
+  // Analyst can only post_analysis, speak, research, move, idle
+  if (role === "analyst" && !["post_analysis", "speak", "research", "move", "idle"].includes(String(obj.action))) {
+    return { action: "idle" };
+  }
 
   switch (obj.action) {
     case "move": {
@@ -80,6 +92,27 @@ export function validateAction(raw: unknown, role: AgentRole): AgentAction {
       const validSources: Set<string> = new Set(["sports", "web", "x", "url"]);
       const source = validSources.has(String(obj.source)) ? String(obj.source) as ResearchSource : "web";
       return { action: "research", query, source };
+    }
+
+    case "add_idea": {
+      if (role !== "creator") return { action: "idle" };
+      const idea = String(obj.idea || "").slice(0, 200);
+      if (!idea) return { action: "idle" };
+      const source = String(obj.source || "observation").slice(0, 100);
+      return { action: "add_idea", idea, source };
+    }
+
+    case "post_analysis": {
+      if (role !== "analyst") return { action: "idle" };
+      const marketId = String(obj.marketId || "");
+      if (!marketId) return { action: "idle" };
+      const probability = Math.max(1, Math.min(99, Math.round(Number(obj.probability) || 50)));
+      const validConfidence = ["low", "medium", "high"];
+      const confidence = validConfidence.includes(String(obj.confidence)) ? String(obj.confidence) as "low" | "medium" | "high" : "low";
+      const method = String(obj.method || "").slice(0, 200);
+      const category = String(obj.category || "other").slice(0, 50);
+      const summary = String(obj.summary || "").slice(0, 200);
+      return { action: "post_analysis", marketId, probability, confidence, method, category, summary };
     }
 
     case "idle":

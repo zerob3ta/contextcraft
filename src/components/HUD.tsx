@@ -31,6 +31,27 @@ interface SpeechEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Board types for Big Board panel
+// ---------------------------------------------------------------------------
+
+interface BoardMarketState {
+  id: string;
+  question: string;
+  fairValue: number | null;
+  hasAnalystOdds: boolean;
+  hasQuotes: boolean;
+  hasTrades: boolean;
+  apiStatus: string | null;
+}
+
+interface BoardStats {
+  total: number;
+  analyzed: number;
+  priced: number; // agents have live bid+ask quotes
+  traded: number;
+}
+
+// ---------------------------------------------------------------------------
 // Chat message types for the unified group chat stream
 // ---------------------------------------------------------------------------
 
@@ -75,6 +96,8 @@ const ROLE_COLORS: Record<AgentRole, string> = {
   creator: "#c4b5fd",
   pricer: "#67e8f9",
   trader: "#fb923c",
+  analyst: "#34d399",
+  bartender: "#a16207",
 };
 
 // ---------------------------------------------------------------------------
@@ -412,7 +435,9 @@ function ChatMessageItem({ msg, allMessages, npcVisitors }: { msg: ChatMsg; allM
   // --- Activity (trades, market creation, pricing, directive fulfillment) ---
   if (msg.type === "activity") {
     const lower = msg.message.toLowerCase();
-    const isTrade = lower.includes("bought") || lower.includes("sold") || lower.includes("yes $") || lower.includes("no $");
+    const isExecution = lower.includes("bought") || lower.includes("sold");
+    const isOrder = lower.includes(" buy ") || lower.includes(" sell ");
+    const isCancel = lower.includes("cancelled");
     const isMarket = lower.includes("created market") || lower.includes("created:");
     const isPrice = lower.includes("priced");
     const isResearch = lower.includes("researched");
@@ -424,8 +449,16 @@ function ChatMessageItem({ msg, allMessages, npcVisitors }: { msg: ChatMsg; allM
       label = "RESEARCH";
       labelColor = "#a3e635";
       bgColor = "rgba(163, 230, 53, 0.06)";
-    } else if (isTrade) {
-      label = "TRADE";
+    } else if (isCancel) {
+      label = "CANCEL";
+      labelColor = "#f87171";
+      bgColor = "rgba(248, 113, 113, 0.06)";
+    } else if (isExecution) {
+      label = "EXECUTION";
+      labelColor = "#4ade80";
+      bgColor = "rgba(74, 222, 128, 0.06)";
+    } else if (isOrder && !isMarket) {
+      label = "ORDER";
       labelColor = "#fb923c";
       bgColor = "rgba(251, 146, 60, 0.06)";
     } else if (isMarket) {
@@ -714,58 +747,88 @@ function MobileTabBar({ active, onChange }: { active: MobileTab; onChange: (t: M
 }
 
 // ---------------------------------------------------------------------------
-// MobileMarketsPanel — shows market cards on mobile
+// MarketsPanel — scrollable market list with coverage stats
 // ---------------------------------------------------------------------------
 
-function MobileMarketsPanel({ markets }: { markets: MarketState[] }) {
+function MarketsPanel({
+  boardMarkets,
+  boardStats,
+}: {
+  boardMarkets: BoardMarketState[];
+  boardStats: BoardStats;
+}) {
   return (
-    <div className="flex-1 overflow-y-auto hud-scroll p-3 space-y-2">
-      {markets.length === 0 ? (
-        <div className="text-[11px] text-white/20 italic pt-8 text-center">
-          No markets yet...
+    <div className="flex flex-col h-full">
+      {/* Stats bar */}
+      {boardStats.total > 0 && (
+        <div className="px-3 pt-2 pb-1.5 flex-shrink-0">
+          <div className="flex items-center gap-2 text-[9px] font-mono text-white/40 mb-1.5">
+            <span>{boardStats.total} total</span>
+            <span className="text-white/10">|</span>
+            <span className="text-emerald-400/60">{boardStats.analyzed} analyzed</span>
+            <span className="text-cyan-400/60">{boardStats.priced} quoted</span>
+          </div>
+          <div className="h-0.5 bg-white/[0.04] rounded-full overflow-hidden flex">
+            {boardStats.total > 0 && (
+              <>
+                <div
+                  className="h-full bg-emerald-500/50 transition-all duration-700"
+                  style={{ width: `${(boardStats.analyzed / boardStats.total) * 100}%` }}
+                />
+                <div
+                  className="h-full bg-cyan-500/40 transition-all duration-700"
+                  style={{ width: `${(Math.max(0, boardStats.priced - boardStats.analyzed) / boardStats.total) * 100}%` }}
+                  title={`${boardStats.priced} quoted`}
+                />
+              </>
+            )}
+          </div>
         </div>
-      ) : (
-        markets.map((m) => {
-          const price = m.fairValue !== null ? Math.round(m.fairValue * 100) : null;
-          return (
-            <div key={m.id} className="rounded-lg bg-white/[0.03] border border-white/5 p-3">
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-[8px] font-pixel uppercase tracking-wider text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded">
-                  Live
-                </span>
-                <span className="text-[9px] text-white/25 ml-auto">
-                  {m.recentActions.length} trades
-                </span>
-              </div>
-              <div className="text-[12px] text-[#e8e6e1] font-medium leading-snug mb-2">
-                {m.question}
-              </div>
-              <div className="flex items-baseline gap-2">
-                {price !== null ? (
-                  <>
-                    <span className="text-[22px] font-bold text-white tabular-nums">{price}</span>
-                    <span className="text-[11px] text-white/30">¢</span>
-                    {m.spread !== null && (
-                      <span className="text-[9px] text-white/25">spread {Math.round(m.spread * 100)}¢</span>
-                    )}
-                  </>
-                ) : (
-                  <span className="text-[11px] text-white/30">UNPRICED</span>
-                )}
-              </div>
-              {m.recentActions.length > 0 && (
-                <div className="mt-2 text-[9px] text-white/30">
-                  last: {m.recentActions[m.recentActions.length - 1].agentName}{" "}
-                  {m.recentActions[m.recentActions.length - 1].action}
-                </div>
-              )}
-            </div>
-          );
-        })
       )}
+
+      {/* Market list */}
+      <div className="flex-1 overflow-y-auto hud-scroll">
+        {boardMarkets.length === 0 ? (
+          <div className="text-[10px] text-white/20 italic py-8 text-center">
+            Waiting for markets...
+          </div>
+        ) : (
+          <div className="py-0.5">
+            {boardMarkets.map((m) => {
+              const price = m.fairValue !== null ? Math.round(m.fairValue * 100) : null;
+              const quoted = m.hasQuotes;
+              const covered = m.hasAnalystOdds && quoted;
+              return (
+                <div
+                  key={m.id}
+                  className="flex items-center gap-1.5 px-2.5 py-1 hover:bg-white/[0.03]"
+                >
+                  {/* Coverage dot: green=fully covered, cyan=quoted, dim=uncovered */}
+                  <span className={`w-1 h-1 rounded-full flex-shrink-0 ${
+                    covered ? "bg-emerald-400" : quoted ? "bg-cyan-400/60" : m.hasAnalystOdds ? "bg-emerald-400/30" : "bg-white/[0.08]"
+                  }`} />
+                  {/* Question — single line, truncated */}
+                  <span className={`text-[10px] flex-1 min-w-0 truncate ${
+                    covered ? "text-[#d1d5db]" : quoted ? "text-white/45" : "text-white/20"
+                  }`}>
+                    {m.question}
+                  </span>
+                  {/* Price — only show if agents have quoted */}
+                  <span className={`text-[9px] font-mono flex-shrink-0 tabular-nums ${
+                    quoted ? "text-white/50" : price !== null ? "text-white/15" : "text-white/10"
+                  }`}>
+                    {price !== null ? `${price}¢` : "--"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
+
 
 // ---------------------------------------------------------------------------
 // MobileAgentsPanel — shows agent roster grouped by building
@@ -925,6 +988,13 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
   const [npcVisitors, setNpcVisitors] = useState<Record<string, { name: string; color: string }>>({});
   // Mobile tab state
   const [mobileTab, setMobileTab] = useState<MobileTab>("town");
+  // Big Board state
+  const [boardMarkets, setBoardMarkets] = useState<BoardMarketState[]>([]);
+  const boardMarketsRef = useRef<BoardMarketState[]>([]);
+  boardMarketsRef.current = boardMarkets;
+  const [boardStats, setBoardStats] = useState<BoardStats>({ total: 0, analyzed: 0, priced: 0, traded: 0 });
+  // Left sidebar tab: agents or markets
+  const [sidebarTab, setSidebarTab] = useState<"agents" | "markets">("agents");
 
   const getAgentName = useCallback((agentId: string): string => {
     return ALL_AGENTS.find((a) => a.id === agentId)?.name || agentId;
@@ -1101,6 +1171,32 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           break;
         }
 
+        case "server_connected": {
+          // Clear demo markets when live server connects
+          setMarkets([]);
+          break;
+        }
+
+        case "board_snapshot": {
+          setBoardMarkets((event as GameEvent & { type: "board_snapshot" }).markets);
+          setBoardStats((event as GameEvent & { type: "board_snapshot" }).stats);
+          break;
+        }
+
+        case "board_sync": {
+          const syncEvent = event as GameEvent & { type: "board_sync" };
+          setBoardStats(syncEvent.stats);
+          break;
+        }
+
+        case "analyst_report": {
+          // Update board market coverage indicator
+          setBoardMarkets((prev) =>
+            prev.map((bm) => bm.id === event.marketId ? { ...bm, hasAnalystOdds: true } : bm)
+          );
+          break;
+        }
+
         case "market_spawning": {
           setMarkets((prev) => {
             if (prev.some((m) => m.id === event.marketId)) return prev;
@@ -1157,8 +1253,10 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             });
             // Add price update to chat stream with market name
             const market = prev.find((m) => m.id === event.marketId);
-            if (market) {
-              const shortQ = market.question.length > 50 ? market.question.slice(0, 47) + "..." : market.question;
+            const boardMarket = !market ? boardMarketsRef.current.find((bm) => bm.id === event.marketId) : null;
+            const question = market?.question || boardMarket?.question;
+            if (question) {
+              const shortQ = question.length > 50 ? question.slice(0, 47) + "..." : question;
               addChatMessage({
                 type: "activity",
                 message: `"${shortQ}" priced at ${Math.round(event.fairValue * 100)}¢ (spread ${Math.round(event.spread * 100)}¢)`,
@@ -1168,27 +1266,42 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
             }
             return updated;
           });
+          // Update board market fair value
+          setBoardMarkets((prev) =>
+            prev.map((bm) => bm.id === event.marketId ? { ...bm, fairValue: event.fairValue } : bm)
+          );
           break;
         }
 
         case "trade_executed": {
           const traderName = getAgentName(event.agentId);
-          setMarkets((prev) =>
-            prev.map((m) => {
-              if (m.id !== event.marketId) return m;
-              return {
-                ...m,
-                recentActions: [
-                  ...m.recentActions,
-                  {
-                    agentName: traderName,
-                    action: `bought ${event.side} ${event.size}x at ${Math.round(event.price * 100)}¢`,
-                    ts: Date.now(),
-                  },
-                ].slice(-4),
-              };
-            })
-          );
+          const tradeType = event.tradeType || "execution";
+          const tradeDir = event.direction || "buy";
+
+          // Only update market actions and board for executions
+          if (tradeType === "execution") {
+            setMarkets((prev) =>
+              prev.map((m) => {
+                if (m.id !== event.marketId) return m;
+                const verb = tradeDir === "sell" ? "sold" : "bought";
+                return {
+                  ...m,
+                  recentActions: [
+                    ...m.recentActions,
+                    {
+                      agentName: traderName,
+                      action: `${verb} ${event.size} ${event.side} at ${Math.round(event.price * 100)}¢`,
+                      ts: Date.now(),
+                    },
+                  ].slice(-4),
+                };
+              })
+            );
+            setBoardMarkets((prev) =>
+              prev.map((bm) => bm.id === event.marketId ? { ...bm, hasTrades: true } : bm)
+            );
+          }
+
           setActiveAgents((prev) => {
             const next = new Set(prev);
             next.add(event.agentId);
@@ -1201,17 +1314,27 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
               return next;
             });
           }, 3000);
-          // Look up market name for the trade
+
+          // Build chat message based on trade type
           setMarkets((currentMarkets) => {
             const market = currentMarkets.find((m) => m.id === event.marketId);
-            const marketQ = event.question || market?.question || "a market";
+            const boardMarket = !market ? boardMarketsRef.current.find((bm) => bm.id === event.marketId) : null;
+            const marketQ = event.question || market?.question || boardMarket?.question || "a market";
             const shortQ = marketQ.length > 50 ? marketQ.slice(0, 47) + "..." : marketQ;
-            const cost = Math.round(event.size * event.price);
+            let message: string;
+            if (tradeType === "cancel") {
+              message = `${traderName} cancelled orders on "${shortQ}"`;
+            } else if (tradeType === "order") {
+              message = `${traderName} ${tradeDir} ${event.size} shares ${event.side} "${shortQ}" at ${Math.round(event.price * 100)}¢`;
+            } else {
+              const verb = tradeDir === "sell" ? "sold" : "bought";
+              message = `${traderName} ${verb} ${event.size} shares ${event.side} "${shortQ}" at ${Math.round(event.price * 100)}¢`;
+            }
             addChatMessage({
               type: "activity",
               agentId: event.agentId,
               agentName: traderName,
-              message: `${traderName} bought ${event.side} $${cost} on "${shortQ}"`,
+              message,
               building: event.building || "pit",
               timestamp: Date.now(),
             });
@@ -1385,18 +1508,57 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
 
       {/* ── MAIN CONTENT ─────────────────────────────────────── */}
       <div className="flex-1 flex min-h-0">
-        {/* Desktop left sidebar: Building Nav */}
-        <div className="w-44 bg-black/50 backdrop-blur-sm border-r border-white/5 p-2 overflow-y-auto hud-scroll hidden md:block flex-shrink-0">
-          <BuildingNav
-            activeBuilding={activeBuilding}
-            onSelectBuilding={setActiveBuilding}
-            agentLocations={agentLocations}
-            activeAgents={activeAgents}
-            agentDirectives={agentDirectives}
-            recentBuildingActivity={recentBuildingActivity}
-            onSelectAgent={setSelectedAgent}
-            npcVisitors={npcVisitors}
-          />
+        {/* Desktop left sidebar: Agents / Markets tabs */}
+        <div className="w-48 bg-black/50 backdrop-blur-sm border-r border-white/5 hidden md:flex flex-col flex-shrink-0">
+          {/* Tab bar */}
+          <div className="flex border-b border-white/5 flex-shrink-0">
+            <button
+              onClick={() => setSidebarTab("agents")}
+              className={`flex-1 text-[10px] font-mono py-2 transition-colors ${
+                sidebarTab === "agents"
+                  ? "text-white/80 border-b border-white/30"
+                  : "text-white/30 hover:text-white/50"
+              }`}
+            >
+              Agents
+            </button>
+            <button
+              onClick={() => setSidebarTab("markets")}
+              className={`flex-1 text-[10px] font-mono py-2 transition-colors ${
+                sidebarTab === "markets"
+                  ? "text-white/80 border-b border-white/30"
+                  : "text-white/30 hover:text-white/50"
+              }`}
+            >
+              Markets
+              {boardStats.total > 0 && (
+                <span className="ml-1 text-[9px] text-white/20">{boardStats.total}</span>
+              )}
+            </button>
+          </div>
+
+          {/* Tab content */}
+          <div className="flex-1 overflow-y-auto hud-scroll min-h-0">
+            {sidebarTab === "agents" ? (
+              <div className="p-2">
+                <BuildingNav
+                  activeBuilding={activeBuilding}
+                  onSelectBuilding={setActiveBuilding}
+                  agentLocations={agentLocations}
+                  activeAgents={activeAgents}
+                  agentDirectives={agentDirectives}
+                  recentBuildingActivity={recentBuildingActivity}
+                  onSelectAgent={setSelectedAgent}
+                  npcVisitors={npcVisitors}
+                />
+              </div>
+            ) : (
+              <MarketsPanel
+                boardMarkets={boardMarkets}
+                boardStats={boardStats}
+              />
+            )}
+          </div>
         </div>
 
         {/* Center area: canvas + mobile tab panels */}
@@ -1440,7 +1602,10 @@ export default function HUD({ children }: { children?: React.ReactNode }) {
           {/* Mobile-only: Markets tab */}
           {mobileTab === "markets" && (
             <div className="flex-1 min-h-0 md:hidden">
-              <MobileMarketsPanel markets={markets} />
+              <MarketsPanel
+                boardMarkets={boardMarkets}
+                boardStats={boardStats}
+              />
             </div>
           )}
 

@@ -1,7 +1,11 @@
 import type { GameEvent, AgentMood } from "../config/events";
 import { DEMO_TIMELINE } from "../config/events";
 import type { TownScene } from "../scenes/TownScene";
+import type { WideCampusScene } from "../scenes/WideCampusScene";
 import type { Emotion } from "../config/agents";
+
+/** Shared scene interface that both TownScene and WideCampusScene satisfy */
+type GameScene = TownScene | WideCampusScene;
 
 const MOOD_TO_EMOTION: Record<AgentMood, Emotion> = {
   bullish: "excited",
@@ -38,7 +42,7 @@ function bubbleText(text: string, maxLen = 140): string {
 }
 
 export class EventProcessor {
-  private scene: TownScene | null = null;
+  private scene: GameScene | null = null;
   private timers: ReturnType<typeof setTimeout>[] = [];
   private idleInterval: ReturnType<typeof setInterval> | null = null;
   private externalHandler?: (event: GameEvent) => void;
@@ -48,7 +52,7 @@ export class EventProcessor {
   /**
    * Bind to a TownScene instance. Must be called before processing events.
    */
-  attach(scene: TownScene): void {
+  attach(scene: GameScene): void {
     this.scene = scene;
   }
 
@@ -155,6 +159,9 @@ export class EventProcessor {
       case "market_rejected":
       case "market_failed":
       case "markets_synced":
+      case "board_sync":
+      case "board_snapshot":
+      case "server_connected":
       case "agent_directive":
       case "directive_fulfilled":
         // Handled by HUD only

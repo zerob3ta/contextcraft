@@ -24,7 +24,7 @@ export async function callMinimax(
         },
         body: JSON.stringify({
           model: "MiniMax-M2.5",
-          max_tokens: 1024,
+          max_tokens: 2048,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
           temperature: 0.8,

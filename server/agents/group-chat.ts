@@ -13,6 +13,7 @@ import type { AgentState } from "../state";
 import { getChatGrounding } from "./grounding";
 import { tickNPCs, isNPC } from "./npcs";
 import { isAgentAwake } from "../sleep";
+import { isOnBreak } from "./breaks";
 
 // ── Types ──
 
@@ -55,6 +56,7 @@ const ROLE_WORK_BUILDINGS: Record<string, Building> = {
   creator: "workshop",
   pricer: "exchange",
   trader: "pit",
+  analyst: "newsroom",
 };
 
 const BUILDING_DISPLAY_NAMES: Record<string, string> = {
@@ -88,6 +90,11 @@ let lastSpeakTick: Map<string, number> = new Map(); // agentId -> tick number wh
 let tickCount = 0;
 // Track agents that recently arrived at a building (for gossip-on-arrival)
 const recentArrivals: Map<string, { from: string; to: string; tick: number }> = new Map();
+// Bartender topic injection tracking
+let lastBartenderTopicTick = 0;
+const BARTENDER_TOPIC_MIN_INTERVAL = 12; // ticks (~3 min)
+const BARTENDER_TOPIC_MAX_INTERVAL = 20; // ticks (~5 min)
+let nextBartenderTopicTick = BARTENDER_TOPIC_MIN_INTERVAL;
 
 // ── Public API ──
 
@@ -214,9 +221,25 @@ export async function runGroupChatTick(excludeIds?: Set<string>): Promise<void> 
     }
   }
 
+  // Bartender topic injection — every 12-20 ticks, force bartender as speaker with topic prompt
+  let bartenderTopicThisTick = false;
+  if (tickCount - lastBartenderTopicTick >= nextBartenderTopicTick) {
+    const barkeep = Array.from(state.agents.values()).find((a) => a.id === "barkeep");
+    if (barkeep && barkeep.location === "lounge" && !(excludeIds && excludeIds.has("barkeep"))) {
+      // Ensure bartender is in the speakers list
+      if (!speakers.find((s) => s.id === "barkeep")) {
+        speakers.push(barkeep);
+      }
+      bartenderTopicThisTick = true;
+      lastBartenderTopicTick = tickCount;
+      nextBartenderTopicTick = BARTENDER_TOPIC_MIN_INTERVAL +
+        Math.floor(Math.random() * (BARTENDER_TOPIC_MAX_INTERVAL - BARTENDER_TOPIC_MIN_INTERVAL));
+    }
+  }
+
   // Generate messages concurrently
   const results = await Promise.allSettled(
-    speakers.map((agent) => generateMessage(agent))
+    speakers.map((agent) => generateMessage(agent, agent.id === "barkeep" && bartenderTopicThisTick))
   );
 
   // Process results
@@ -290,98 +313,95 @@ export function notifyBuildingEvent(building: string): void {
   buildingEventTimestamps[building] = Date.now();
 }
 
-/** Role → which buildings attract them */
+/** Role → which buildings attract them, with weighted distributions */
 const ROLE_AFFINITIES: Record<string, string[]> = {
   creator: ["newsroom", "workshop"],
   pricer: ["exchange", "newsroom"],
-  trader: ["pit", "exchange"],
+  trader: ["pit", "newsroom", "exchange"],
+  analyst: ["newsroom", "exchange"],
+};
+
+/** Role → weighted distribution for next building pick (must match ROLE_AFFINITIES order) */
+const ROLE_WEIGHTS: Record<string, number[]> = {
+  creator: [0.70, 0.30],
+  pricer: [0.60, 0.40],
+  trader: [0.50, 0.30, 0.20],
+  analyst: [0.65, 0.35],
 };
 
 function updateAgentMagnetism(available: AgentState[]): void {
-  const now = Date.now();
-
   for (const agent of available) {
     // NPCs stay in the lounge — don't move them around
     if (isNPC(agent.id)) continue;
+    // Bartender never moves
+    if (agent.role === "bartender") continue;
+    // Agents on break stay in lounge
+    if (isOnBreak(agent.id)) continue;
 
     const currentLoc = agent.location;
     const ticks = agentBuildingTicks.get(agent.id) || 0;
 
-    // If agent is at a non-lounge building, increment their stay counter
+    // If agent is at a work building, increment stay counter
     if (currentLoc !== "lounge") {
       agentBuildingTicks.set(agent.id, ticks + 1);
 
-      // After 3-5 ticks at a work building, drift back to lounge
-      const maxStay = 3 + Math.floor(Math.random() * 3);
+      // Stay 8-20 ticks at work buildings before considering a move
+      const maxStay = 8 + Math.floor(Math.random() * 13); // 8-20
       if (ticks >= maxStay) {
+        // Pick next building by role-weighted distribution
+        const nextBuilding = pickWeightedBuilding(agent.role, currentLoc);
         const fromBuilding = agent.location;
         agentBuildingTicks.set(agent.id, 0);
-        state.moveAgent(agent.id, "lounge");
-        broadcast({ type: "agent_move", agentId: agent.id, destination: "lounge", reason: "Heading back" });
-        // Track for gossip-on-arrival
-        recentArrivals.set(agent.id, { from: fromBuilding, to: "lounge", tick: tickCount });
-        continue;
+
+        state.moveAgent(agent.id, nextBuilding as Building);
+        broadcast({
+          type: "agent_move",
+          agentId: agent.id,
+          destination: nextBuilding,
+          reason: getBuildingPullReason(agent.role, nextBuilding),
+        });
+        recentArrivals.set(agent.id, { from: fromBuilding, to: nextBuilding, tick: tickCount });
       }
     }
 
-    // If agent is in lounge, check if any hot building should attract them
-    if (currentLoc === "lounge") {
-      const affinities = ROLE_AFFINITIES[agent.role] || [];
-      let bestBuilding: string | null = null;
-      let bestScore = 0;
-
-      for (const building of affinities) {
-        const lastEvent = buildingEventTimestamps[building] || 0;
-        const age = now - lastEvent;
-        if (age > MAGNETISM_DECAY_MS) continue;
-
-        // Score: fresher events = higher pull, primary affinity = higher
-        const freshness = 1 - age / MAGNETISM_DECAY_MS;
-        const affinityBonus = affinities.indexOf(building) === 0 ? 1.5 : 1.0;
-        const score = freshness * affinityBonus;
-
-        if (score > bestScore) {
-          bestScore = score;
-          bestBuilding = building;
-        }
-      }
-
-      // Probability check: higher score = more likely to move
-      if (bestBuilding && Math.random() < bestScore * 0.4) {
-        // Don't overcrowd: max 4 agents per non-lounge building
-        const atBuilding = available.filter((a) => a.location === bestBuilding).length;
-        if (atBuilding < 4) {
-          const fromBuilding = agent.location;
-          agentBuildingTicks.set(agent.id, 0);
-          state.moveAgent(agent.id, bestBuilding as Building);
-          broadcast({
-            type: "agent_move",
-            agentId: agent.id,
-            destination: bestBuilding,
-            reason: getBuildingPullReason(agent.role, bestBuilding),
-          });
-          // Track for gossip-on-arrival
-          recentArrivals.set(agent.id, { from: fromBuilding, to: bestBuilding, tick: tickCount });
-        }
-      } else if (!bestBuilding && Math.random() < 0.08) {
-        // Idle wandering — ~8% chance per tick to visit a random building
-        const wanderTargets = (ROLE_AFFINITIES[agent.role] || ["newsroom"]);
-        const target = wanderTargets[Math.floor(Math.random() * wanderTargets.length)];
-        const atBuilding = available.filter((a) => a.location === target).length;
-        if (atBuilding < 4) {
-          agentBuildingTicks.set(agent.id, 0);
-          state.moveAgent(agent.id, target as Building);
-          broadcast({
-            type: "agent_move",
-            agentId: agent.id,
-            destination: target,
-            reason: getBuildingPullReason(agent.role, target),
-          });
-          recentArrivals.set(agent.id, { from: "lounge", to: target, tick: tickCount });
-        }
-      }
+    // If in lounge (not on break), move to a work building
+    if (currentLoc === "lounge" && !isOnBreak(agent.id)) {
+      const nextBuilding = pickWeightedBuilding(agent.role, "lounge");
+      agentBuildingTicks.set(agent.id, 0);
+      state.moveAgent(agent.id, nextBuilding as Building);
+      broadcast({
+        type: "agent_move",
+        agentId: agent.id,
+        destination: nextBuilding,
+        reason: getBuildingPullReason(agent.role, nextBuilding),
+      });
+      recentArrivals.set(agent.id, { from: "lounge", to: nextBuilding, tick: tickCount });
     }
   }
+}
+
+/** Pick next building using role-weighted distribution, avoiding current location */
+function pickWeightedBuilding(role: string, currentBuilding: string): string {
+  const affinities = ROLE_AFFINITIES[role] || ["newsroom"];
+  const weights = ROLE_WEIGHTS[role] || [1];
+
+  // Filter out current building and renormalize weights
+  const candidates: { building: string; weight: number }[] = [];
+  for (let i = 0; i < affinities.length; i++) {
+    if (affinities[i] !== currentBuilding) {
+      candidates.push({ building: affinities[i], weight: weights[i] || 0 });
+    }
+  }
+
+  if (candidates.length === 0) return affinities[0];
+
+  const totalWeight = candidates.reduce((s, c) => s + c.weight, 0);
+  let roll = Math.random() * totalWeight;
+  for (const c of candidates) {
+    roll -= c.weight;
+    if (roll <= 0) return c.building;
+  }
+  return candidates[candidates.length - 1].building;
 }
 
 function getBuildingPullReason(role: string, building: string): string {
@@ -397,6 +417,10 @@ function getBuildingPullReason(role: string, building: string): string {
     trader: {
       pit: ["Looking for trades", "Market's moving", "Opportunity spotted"],
       exchange: ["Checking prices", "Spread analysis"],
+    },
+    analyst: {
+      newsroom: ["Running models", "Checking data feeds", "New market to analyze"],
+      exchange: ["Reviewing spreads", "Checking my estimates"],
     },
   };
   const options = reasons[role]?.[building] || ["Heading over"];
@@ -481,6 +505,9 @@ function selectSpeakers(pool: AgentState[], count: number): AgentState[] {
     // NPC visitors get a big boost — they're temporary and should be heard
     if (isNPC(agent.id)) score += 30;
 
+    // Bartender always boosted in lounge
+    if (agent.id === "barkeep" && agent.location === "lounge") score += 40;
+
     // Noise factor
     score += Math.random() * 20 - 10;
 
@@ -513,7 +540,7 @@ interface GenerateResult {
   conviction: { marketId: string; marketName: string; direction: "bullish" | "bearish"; strength: number } | null;
 }
 
-async function generateMessage(agent: AgentState): Promise<GenerateResult | null> {
+async function generateMessage(agent: AgentState, bartenderNewTopic = false): Promise<GenerateResult | null> {
   // Pin the building at the start — agent.location can change mid-generation
   // if a concurrent runJobAgent moves this agent. Using a pinned value ensures
   // the attention window, reply validation, and message tag all use the same building.
@@ -536,6 +563,10 @@ async function generateMessage(agent: AgentState): Promise<GenerateResult | null
     weekday: "long", year: "numeric", month: "long", day: "numeric",
   });
 
+  const bartenderTopicInstruction = bartenderNewTopic
+    ? `\n\nSPECIAL INSTRUCTION: You're starting a new conversation. Bring up a fun topic — could be a dumb hypothetical ("would you rather fight 100 duck-sized horses..."), something from pop culture, a debate starter, ask someone about their weekend, roast someone playfully, tell a funny story. Be the social glue.`
+    : "";
+
   const system = isLounge
     ? `You are ${agent.name}, hanging out in the lounge after work.
 PERSONALITY: ${agent.personality}
@@ -543,7 +574,7 @@ CURRENT VIBE: ${currentMood === "bullish" ? "good mood" : currentMood === "beari
 TODAY: ${today}
 LOCATION: ${buildingName}
 
-${buildingContext}
+${buildingContext}${bartenderTopicInstruction}
 
 RULES:
 - ${lengthGuide}
@@ -1006,9 +1037,13 @@ function buildMarketContext(): string {
         else if (remainingMs < 86400_000) deadlineTag = ` ⏰${Math.round(remainingMs / 3600_000)}h left`;
         else deadlineTag = ` ⏰${Math.round(remainingMs / 86400_000)}d left`;
       }
-      // Oracle one-liner
-      const oracleTag = m.oracleSummary ? ` — oracle: ${m.oracleSummary}` : "";
-      parts.push(`  - "${title}" (${price}${deadlineTag})${oracleTag}`);
+      // Analyst odds (preferred over oracle)
+      const analystTag = m.analystOdds
+        ? ` — analyst: ${m.analystOdds.probability}% (${m.analystOdds.confidence}) "${m.analystOdds.summary}"`
+        : "";
+      // Oracle one-liner (only if no analyst odds)
+      const oracleTag = !m.analystOdds && m.oracleSummary ? ` — oracle: ${m.oracleSummary}` : "";
+      parts.push(`  - "${title}" (${price}${deadlineTag})${analystTag}${oracleTag}`);
     }
   }
 

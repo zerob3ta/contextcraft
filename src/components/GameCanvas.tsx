@@ -25,7 +25,10 @@ export default function GameCanvas() {
       try {
         const { createPhaserGame } = await import("../game/PhaserGame");
         if (destroyed || !containerRef.current) return;
-        const handle = createPhaserGame(containerRef.current);
+        const useCampus =
+          typeof window !== "undefined" &&
+          new URLSearchParams(window.location.search).get("scene") === "campus";
+        const handle = createPhaserGame(containerRef.current, useCampus);
         if (!handle) return;
         handleRef.current = handle;
 
@@ -83,14 +86,14 @@ export default function GameCanvas() {
           console.log("[WS] Connected to agent server — live mode");
           liveMode.current = true;
           demoStarted.current = false;
-          // Kill any running demo timeline, re-attach for live events
+          // Kill any running demo timeline, clear demo state, re-attach for live events
           handle.eventProcessor.destroy();
+          gameEventBus.stopDemoTimeline();
+          gameEventBus.emit({ type: "server_connected" });
           const scene = handle.getScene();
           if (scene) {
             handle.eventProcessor.attach(scene);
-            handle.eventProcessor.onEvent((event) => {
-              gameEventBus.emit(event);
-            });
+            // No onEvent bridge needed — ws.onmessage emits directly to gameEventBus
             scene.onBuildingSelect((buildingId) => {
               gameEventBus.emit({ type: "building_selected", buildingId });
             });
@@ -101,6 +104,9 @@ export default function GameCanvas() {
           try {
             const event = JSON.parse(msg.data as string) as GameEvent;
             handle.eventProcessor.injectEvent(event);
+            // Emit all WS events to gameEventBus for HUD consumption.
+            // EventProcessor.onEvent bridge is only used for demo timeline events.
+            gameEventBus.emit(event);
           } catch (err) {
             console.warn("[WS] Failed to parse message:", err);
           }

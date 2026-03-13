@@ -54,6 +54,20 @@ export interface Market {
   lastTradePrice: number | null;     // last trade price (cents)
   oracleDivergence: number | null;   // DEPRECATED — kept for compat, always null
   priceHistory: { time: number; price: number }[];
+  // Analyst odds (deterministic JIT pricing engine)
+  analystOdds: AnalystOdds | null;
+}
+
+// ─── Analyst Odds ───
+
+export interface AnalystOdds {
+  probability: number;       // 0-100
+  confidence: "low" | "medium" | "high";
+  method: string;            // "Log-normal vol model: BTC 60% vol, 7d"
+  category: string;          // "crypto_price", "sports_game", etc.
+  summary: string;           // 1-sentence qualitative take
+  analystId: string;
+  computedAt: number;
 }
 
 // ─── Agent State ───
@@ -73,6 +87,20 @@ export interface AgentPosition {
   avgPrice: number;
 }
 
+export interface MarketIdea {
+  idea: string;
+  addedAt: number;
+  source: string;
+}
+
+export interface PricingEvent {
+  agentId: string;
+  marketId: string;
+  fairValue: number;
+  spread: number;
+  ts: number;
+}
+
 export interface AgentState {
   id: string;
   name: string;
@@ -88,6 +116,8 @@ export interface AgentState {
   // Research results (from newsroom research action)
   researchResult: string | null;  // cached result from last research, consumed next tick
   researchQuery: string | null;   // the query that produced the result
+  // Creator market ideas backlog
+  marketIdeasBacklog?: MarketIdea[];
   // Context Markets wallet
   walletAddress?: string;
   usdcBalance?: number;
@@ -108,6 +138,36 @@ class ServerState {
   recentSpeeches: { agentId: string; message: string; ts: number }[] = [];
   recentActions: { agentId: string; action: string; detail: string; ts: number }[] = [];
 
+  // Recent pricing events — traders watch these for signals
+  recentPricingEvents: PricingEvent[] = [];
+
+  // Trade journal — per-agent execution log with fill prices
+  tradeJournal: {
+    agentId: string;
+    marketId: string;
+    type: "order" | "execution" | "cancel";
+    side: "YES" | "NO";
+    direction: "buy" | "sell";
+    shares: number;
+    priceCents: number;
+    ts: number;
+    reason?: string; // why cancelled, or execution context
+  }[] = [];
+
+  // Per-agent per-market trade cooldown (prevents traders from looping on same markets)
+  tradeTimestamps: Map<string, Map<string, number>> = new Map();
+
+  recordTradeCooldown(agentId: string, marketId: string): void {
+    let agentMap = this.tradeTimestamps.get(agentId);
+    if (!agentMap) { agentMap = new Map(); this.tradeTimestamps.set(agentId, agentMap); }
+    agentMap.set(marketId, Date.now());
+  }
+
+  getMarketCooldownMs(agentId: string, marketId: string): number {
+    const ts = this.tradeTimestamps.get(agentId)?.get(marketId);
+    return ts ? Date.now() - ts : Infinity;
+  }
+
   // Conversation insights (legacy, used by job prompts)
   conversationInsights: Map<string, { insight: string; ts: number }[]> = new Map();
   lastMarketCreatedAt = 0; // global cooldown for market creation
@@ -118,6 +178,15 @@ class ServerState {
   // Reverse lookup: apiMarketId → local market id
   private apiMarketIdMap: Map<string, string> = new Map();
 
+  addPricingEvent(event: PricingEvent): void {
+    this.recentPricingEvents.unshift(event);
+    // Cap at 20, expire after 5 min
+    const cutoff = Date.now() - 5 * 60_000;
+    this.recentPricingEvents = this.recentPricingEvents
+      .filter((e) => e.ts > cutoff)
+      .slice(0, 20);
+  }
+
   addSpeech(agentId: string, message: string): void {
     this.recentSpeeches.unshift({ agentId, message, ts: Date.now() });
     if (this.recentSpeeches.length > 20) this.recentSpeeches.length = 20;
@@ -126,6 +195,21 @@ class ServerState {
   addAction(agentId: string, action: string, detail: string): void {
     this.recentActions.unshift({ agentId, action, detail, ts: Date.now() });
     if (this.recentActions.length > 20) this.recentActions.length = 20;
+  }
+
+  logTrade(entry: {
+    agentId: string; marketId: string; type: "order" | "execution" | "cancel";
+    side: "YES" | "NO"; direction: "buy" | "sell"; shares: number; priceCents: number;
+    reason?: string;
+  }): void {
+    this.tradeJournal.unshift({ ...entry, ts: Date.now() });
+    // Keep last 100 entries, expire after 30 min
+    const cutoff = Date.now() - 30 * 60_000;
+    this.tradeJournal = this.tradeJournal.filter((e) => e.ts > cutoff).slice(0, 100);
+  }
+
+  getTradeJournal(agentId: string, limit = 10): typeof this.tradeJournal {
+    return this.tradeJournal.filter((e) => e.agentId === agentId).slice(0, limit);
   }
 
   getAgentsAtLocation(location: string): AgentState[] {
@@ -179,6 +263,8 @@ class ServerState {
       creator: "newsroom",
       pricer: "exchange",
       trader: "pit",
+      analyst: "newsroom",
+      bartender: "lounge",
     };
 
     for (const cfg of ALL_AGENTS) {
@@ -198,6 +284,29 @@ class ServerState {
         researchQuery: null,
       });
     }
+  }
+
+  // ── Analyst Odds ──
+
+  updateAnalystOdds(marketId: string, odds: AnalystOdds): void {
+    const m = this.markets.get(marketId);
+    if (m) m.analystOdds = odds;
+  }
+
+  getMarketsNeedingAnalysis(): Market[] {
+    const now = Date.now();
+    const STALE_MS = 15 * 60_000; // 15 minutes — long enough to analyze all markets before refreshing
+    return this.getBigBoard().filter((m) => {
+      // Skip resolving markets (getBigBoard already filters resolved)
+      if (m.resolutionStatus === "pending" ||
+          m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed") {
+        return false;
+      }
+      // No analyst odds yet → needs analysis
+      if (!m.analystOdds) return true;
+      // Stale odds → needs re-analysis
+      return now - m.analystOdds.computedAt > STALE_MS;
+    });
   }
 
   // ── News ──
@@ -282,6 +391,7 @@ class ServerState {
       lastTradePrice: null,
       oracleDivergence: null,
       priceHistory: [],
+      analystOdds: null,
     };
     this.markets.set(id, market);
     return market;
@@ -326,6 +436,7 @@ class ServerState {
       lastTradePrice: null,
       oracleDivergence: null,
       priceHistory: [],
+      analystOdds: null,
     };
     this.markets.set(id, market);
     this.apiMarketIdMap.set(info.apiMarketId, id);
@@ -356,6 +467,51 @@ class ServerState {
 
   getActiveMarkets(): Market[] {
     return Array.from(this.markets.values());
+  }
+
+  /** The Big Board: all API-sourced active markets, sorted by coverage priority */
+  getBigBoard(): Market[] {
+    const now = Date.now();
+    return [...this.markets.values()]
+      .filter(m => m.apiMarketId && (m.apiStatus === "active" || m.apiStatus === null))
+      .filter(m => m.apiStatus !== "resolved" && m.apiStatus !== "closed")
+      .filter(m => m.resolutionStatus !== "resolved" && m.resolutionStatus !== "pending")
+      .filter(m => !m.deadline || new Date(m.deadline).getTime() > now) // skip expired
+      .sort((a, b) => {
+        // Quoted markets first, then by coverage score (higher = more covered)
+        const aQuoted = (a.bestBid !== null && a.bestAsk !== null) ? 1 : 0;
+        const bQuoted = (b.bestBid !== null && b.bestAsk !== null) ? 1 : 0;
+        if (aQuoted !== bQuoted) return bQuoted - aQuoted; // quoted first
+        return this.coverageScore(b) - this.coverageScore(a); // then most covered first
+      });
+  }
+
+  /** Coverage score: 0 = needs everything, 4 = fully covered */
+  private coverageScore(m: Market): number {
+    let score = 0;
+    if (m.analystOdds && Date.now() - m.analystOdds.computedAt < 15 * 60_000) score += 1;
+    if (m.fairValue !== null) score += 1;
+    if (m.bestBid !== null && m.bestAsk !== null) score += 1;
+    if (m.trades.length > 0) score += 1;
+    return score;
+  }
+
+  /** Markets needing initial price — board-aware */
+  getMarketsNeedingPrice(): Market[] {
+    return this.getBigBoard().filter(m => m.fairValue === null);
+  }
+
+  /** Board coverage stats for logging/display.
+   *  "priced" = agents have live bid+ask quotes (not just API bootstrap price).
+   */
+  getBoardStats(): { total: number; analyzed: number; priced: number; traded: number } {
+    const board = this.getBigBoard();
+    return {
+      total: board.length,
+      analyzed: board.filter(m => m.analystOdds).length,
+      priced: board.filter(m => m.bestBid !== null && m.bestAsk !== null).length,
+      traded: board.filter(m => m.trades.length > 0).length,
+    };
   }
 
   getUnpricedMarkets(): Market[] {

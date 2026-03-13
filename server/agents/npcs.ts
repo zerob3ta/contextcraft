@@ -146,10 +146,10 @@ const activeNPCs = new Map<string, {
 let npcCounter = 0;
 let spawnTimer: ReturnType<typeof setInterval> | null = null;
 
-const MIN_SPAWN_INTERVAL = 90_000;  // 1.5 min minimum between spawns
-const MAX_SPAWN_INTERVAL = 300_000; // 5 min max
-const MIN_STAY_TICKS = 15;          // stay for at least 15 chat ticks (~2 min)
-const MAX_STAY_TICKS = 40;          // leave after 40 chat ticks max (~5 min)
+const MIN_SPAWN_INTERVAL = 120_000;  // 2 min minimum between spawns
+const MAX_SPAWN_INTERVAL = 240_000;  // 4 min max
+const MIN_STAY_TICKS = 8;           // stay for at least 8 chat ticks (~2 min)
+const MAX_STAY_TICKS = 16;          // leave after 16 chat ticks max (~4 min)
 const MAX_ACTIVE_NPCS = 2;          // max 2 NPCs at once
 
 let lastSpawnTime = 0;

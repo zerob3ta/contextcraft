@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { notifyConnect, notifyDisconnect } from "./sleep";
+import { state } from "./state";
 
 export type AgentMood = "bullish" | "bearish" | "uncertain" | "confident" | "scared" | "manic" | "neutral";
 
@@ -8,7 +9,7 @@ export type GameEvent =
   | { type: "agent_speak"; agentId: string; message: string; emotion: string; building?: string }
   | { type: "market_spawning"; marketId: string; question: string; creator: string; building?: string; apiMarketId?: string; url?: string }
   | { type: "price_update"; marketId: string; fairValue: number; spread: number; building?: string }
-  | { type: "trade_executed"; agentId: string; marketId: string; side: "YES" | "NO"; size: number; price: number; building?: string; question?: string }
+  | { type: "trade_executed"; agentId: string; marketId: string; side: "YES" | "NO"; size: number; price: number; building?: string; question?: string; tradeType?: "order" | "execution" | "cancel"; direction?: "buy" | "sell" }
   | { type: "news_alert"; headline: string; source: string; severity: "breaking" | "normal"; building?: string }
   | { type: "chat_message"; id: string; agentId: string; agentName: string; role: string; message: string; mood: AgentMood; replyTo: string | null; replyPreview: string | null; building?: string }
   | { type: "chat_directive"; agentId: string; agentName: string; directive: string; destination: string; building?: string }
@@ -20,10 +21,14 @@ export type GameEvent =
   | { type: "npc_spawn"; agentId: string; name: string; color: string; accentColor: string; personality: string; backstory: string; spriteFeatures: { hat?: string; glasses?: boolean; size: "small" | "medium" | "large"; hairStyle?: string } }
   | { type: "npc_despawn"; agentId: string }
   // Context Markets integration events
+  | { type: "market_pending"; agentId: string; question: string; building?: string }
   | { type: "market_rejected"; agentId: string; question: string; reason: string; building?: string }
   | { type: "market_failed"; agentId: string; question: string; reason: string; building?: string }
   | { type: "markets_synced"; count: number }
-  | { type: "briefing_updated"; count: number; categories: string[] };
+  | { type: "board_sync"; count: number; stats: { total: number; analyzed: number; priced: number; traded: number } }
+  | { type: "briefing_updated"; count: number; categories: string[] }
+  // Analyst report events
+  | { type: "analyst_report"; agentId: string; agentName: string; marketId: string; question: string; probability: number; confidence: string; summary: string; building?: string };
 
 let wss: WebSocketServer | null = null;
 
@@ -43,6 +48,25 @@ export function startWsServer(port: number): WebSocketServer {
       severity: "normal",
     };
     ws.send(JSON.stringify(welcome));
+
+    // Send board snapshot — full market list with coverage status
+    const board = state.getBigBoard();
+    const boardStats = state.getBoardStats();
+    const shorten = (q: string) => q.replace(/^Will\s+/i, "").replace(/\?$/, "");
+    const boardSnapshot = {
+      type: "board_snapshot",
+      markets: board.map((m) => ({
+        id: m.id,
+        question: shorten(m.question),
+        fairValue: m.fairValue,
+        hasAnalystOdds: !!m.analystOdds,
+        hasQuotes: m.bestBid !== null && m.bestAsk !== null,
+        hasTrades: m.trades.length > 0,
+        apiStatus: m.apiStatus,
+      })),
+      stats: boardStats,
+    };
+    ws.send(JSON.stringify(boardSnapshot));
 
     ws.on("close", () => {
       const remaining = wss!.clients.size;

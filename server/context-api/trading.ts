@@ -155,7 +155,11 @@ export async function sweepStaleOrders(): Promise<void> {
 
     // Cancel stale orders market by market
     for (const [localMarketId, reasons] of ordersToCancel) {
+      const market = state.markets.get(localMarketId);
+      const shortQ = market ? market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70) : localMarketId;
       console.log(`[StaleOrderSweep] ${agent.name}: cancelling orders on ${localMarketId} — ${reasons[0]}`);
+      state.logTrade({ agentId: agent.id, marketId: localMarketId, type: "cancel", side: "YES", direction: "buy", shares: 0, priceCents: 0, reason: `stale: ${reasons[0]}` });
+      state.addAction(agent.id, "cancel", `${agent.name} cancelled stale orders on "${shortQ}" — ${reasons[0]}`);
       await cancelOrders(agent.id, localMarketId).catch(() => {});
     }
   }
@@ -198,10 +202,11 @@ export async function placePricingOrders(
   spreadCents = Math.max(2, Math.min(20, Math.round(spreadCents)));
 
   const halfSpread = Math.floor(spreadCents / 2);
-  const yesBid = Math.max(1, fairValueCents - halfSpread);
-  const yesAsk = Math.min(99, fairValueCents + Math.ceil(spreadCents / 2));
-  const noBid = Math.max(1, (100 - fairValueCents) - halfSpread);
-  const noAsk = Math.min(99, (100 - fairValueCents) + Math.ceil(spreadCents / 2));
+
+  // 3 tiers of depth: tight, mid, wide
+  // Each tier steps further from fair value with increasing size
+  const TIER_OFFSETS = [0, 3, 6]; // additional cents from base spread per tier
+  const TIER_SIZE_MULT = [1.0, 2.0, 3.0]; // size multiplier per tier
 
   // Dynamic sizing: ~2% of account value per side, with inventory skew
   let yesInventory = 0;
@@ -215,15 +220,54 @@ export async function placePricingOrders(
     }
   }
 
-  const baseSize = sizeFromAccount(agent, 0.02, fairValueCents, 5, 200);
-  // Skew: reduce bids on side we're long, increase asks to offload
-  const invSkew = Math.min(Math.floor(baseSize * 0.4), 50);
-  const yesSkew = yesInventory > 0 ? Math.min(invSkew, Math.floor(yesInventory / 5)) : 0;
-  const noSkew = noInventory > 0 ? Math.min(invSkew, Math.floor(noInventory / 5)) : 0;
-  const yesBidSize = Math.max(5, baseSize - yesSkew);
-  const yesAskSize = Math.max(5, baseSize + yesSkew);
-  const noBidSize = Math.max(5, baseSize - noSkew);
-  const noAskSize = Math.max(5, baseSize + noSkew);
+  // Tight sizes due to limited testnet collateral (~$14-1000 per pricer)
+  // 12 orders/market × 25 markets = 300 orders, size 1 = ~$0.50/order = ~$150 total
+  const baseSize = 1;
+  // No inventory skew at size 1 — can't go below 1
+  const yesSkew = 0;
+  const noSkew = 0;
+
+  // Build 12 orders: 3 tiers × 2 sides (bid/ask) × 2 outcomes (YES/NO)
+  type CreateOrder = { marketId: string; outcome: "yes" | "no"; side: "buy" | "sell"; priceCents: number; size: number; inventoryModeConstraint?: 2 };
+  const creates: CreateOrder[] = [];
+  type TrackedOrder = { nonce: string; side: "buy" | "sell"; price: number; size: number; marketId: string };
+  const trackedTemplate: { side: "buy" | "sell"; price: number; size: number }[] = [];
+
+  const noFV = 100 - fairValueCents;
+
+  for (let tier = 0; tier < 3; tier++) {
+    const offset = TIER_OFFSETS[tier];
+    const sizeMult = TIER_SIZE_MULT[tier];
+
+    const yesBid = Math.max(1, fairValueCents - halfSpread - offset);
+    const yesAsk = Math.min(99, fairValueCents + Math.ceil(spreadCents / 2) + offset);
+    const noBid = Math.max(1, noFV - halfSpread - offset);
+    const noAsk = Math.min(99, noFV + Math.ceil(spreadCents / 2) + offset);
+
+    const yesBidSize = Math.max(5, Math.round((baseSize - yesSkew) * sizeMult));
+    const yesAskSize = Math.max(5, Math.round((baseSize + yesSkew) * sizeMult));
+    const noBidSize = Math.max(5, Math.round((baseSize - noSkew) * sizeMult));
+    const noAskSize = Math.max(5, Math.round((baseSize + noSkew) * sizeMult));
+
+    creates.push(
+      { marketId: market.apiMarketId!, outcome: "yes", side: "buy", priceCents: yesBid, size: yesBidSize },
+      { marketId: market.apiMarketId!, outcome: "yes", side: "sell", priceCents: yesAsk, size: yesAskSize, inventoryModeConstraint: 2 },
+      { marketId: market.apiMarketId!, outcome: "no", side: "buy", priceCents: noBid, size: noBidSize },
+      { marketId: market.apiMarketId!, outcome: "no", side: "sell", priceCents: noAsk, size: noAskSize, inventoryModeConstraint: 2 },
+    );
+    trackedTemplate.push(
+      { side: "buy", price: yesBid, size: yesBidSize },
+      { side: "sell", price: yesAsk, size: yesAskSize },
+      { side: "buy", price: noBid, size: noBidSize },
+      { side: "sell", price: noAsk, size: noAskSize },
+    );
+  }
+
+  // Innermost tier prices for logging / bestBid/bestAsk
+  const t1YesBid = creates[0].priceCents;
+  const t1YesAsk = creates[1].priceCents;
+  const t1NoBid = creates[2].priceCents;
+  const t1NoAsk = creates[3].priceCents;
 
   try {
     // Get all open order nonces for atomic cancel
@@ -232,50 +276,59 @@ export async function placePricingOrders(
       .filter((o) => o.status === "open")
       .map((o) => o.nonce as `0x${string}`);
 
-    // Build 4 new orders — SDK PlaceOrderRequest uses outcome ("yes"/"no") + priceCents
-    const creates = [
-      { marketId: market.apiMarketId!, outcome: "yes" as const, side: "buy" as const, priceCents: yesBid, size: yesBidSize },
-      { marketId: market.apiMarketId!, outcome: "yes" as const, side: "sell" as const, priceCents: yesAsk, size: yesAskSize, inventoryModeConstraint: 2 as const },
-      { marketId: market.apiMarketId!, outcome: "no" as const, side: "buy" as const, priceCents: noBid, size: noBidSize },
-      { marketId: market.apiMarketId!, outcome: "no" as const, side: "sell" as const, priceCents: noAsk, size: noAskSize, inventoryModeConstraint: 2 as const },
-    ];
+    // Cancel existing orders in batches of 20 (API limit)
+    for (let i = 0; i < cancelNonces.length; i += 20) {
+      try {
+        await client.orders.bulkCancel(cancelNonces.slice(i, i + 20));
+      } catch (cancelErr) {
+        console.warn(`[Trading] ${agentId}: cancel batch failed, continuing:`, cancelErr);
+      }
+    }
 
-    // Atomic bulk: cancels execute first, then creates
+    // Create 12 new orders via bulk (no cancels mixed in)
     let results: { nonce: string }[];
     try {
-      const bulkResult = await client.orders.bulk(creates, cancelNonces);
-      // Extract nonces from bulk results — create results have type: "create"
-      results = bulkResult.results
-        .filter((r) => r.type === "create" && (r as Record<string, unknown>).success)
+      const bulkResult = await client.orders.bulk(creates, []);
+      const createResults = bulkResult.results.filter((r) => r.type === "create");
+      const successCount = createResults.filter((r) => (r as Record<string, unknown>).success).length;
+      const failCount = createResults.length - successCount;
+      if (failCount > 0 || successCount < creates.length) {
+        console.log(`[Trading] ${agentId}: bulk result — ${successCount}/${creates.length} created, ${failCount} failed`);
+        const firstFail = createResults.find((r) => !(r as Record<string, unknown>).success);
+        if (firstFail) console.log(`[Trading] ${agentId}: first failure:`, JSON.stringify(firstFail).slice(0, 200));
+      }
+      results = createResults
+        .filter((r) => (r as Record<string, unknown>).success)
         .map((r) => {
           const order = (r as Record<string, unknown>).order as Record<string, unknown> | undefined;
           return { nonce: String(order?.nonce || "") };
         });
     } catch {
-      // Fallback: sequential cancel + create if bulk not supported
-      if (cancelNonces.length > 0) {
-        await client.orders.bulkCancel(cancelNonces);
-      }
+      // Fallback: sequential create if bulk fails
       results = [];
       for (const order of creates) {
-        const r = await client.orders.create(order);
-        results.push({ nonce: r.order?.nonce || "" });
+        try {
+          const r = await client.orders.create(order);
+          results.push({ nonce: r.order?.nonce || "" });
+        } catch { results.push({ nonce: "" }); }
       }
     }
 
     // Track orders locally
-    type TrackedOrder = { nonce: string; side: "buy" | "sell"; price: number; size: number; marketId: string };
-    const tracked: TrackedOrder[] = [
-      { nonce: results[0]?.nonce || "", side: "buy", price: yesBid, size: yesBidSize, marketId: localMarketId },
-      { nonce: results[1]?.nonce || "", side: "sell", price: yesAsk, size: yesAskSize, marketId: localMarketId },
-      { nonce: results[2]?.nonce || "", side: "buy", price: noBid, size: noBidSize, marketId: localMarketId },
-      { nonce: results[3]?.nonce || "", side: "sell", price: noAsk, size: noAskSize, marketId: localMarketId },
-    ];
+    const tracked: TrackedOrder[] = trackedTemplate.map((t, i) => ({
+      nonce: results[i]?.nonce || "",
+      side: t.side,
+      price: t.price,
+      size: t.size,
+      marketId: localMarketId,
+    }));
 
     const inv = yesInventory > 0 || noInventory > 0 ? ` (inv: ${yesInventory}Y/${noInventory}N)` : "";
-    console.log(`[Trading] ${agentId}: priced ${localMarketId} YES ${yesBid}¢/${yesAsk}¢ NO ${noBid}¢/${noAsk}¢${inv}`);
+    console.log(`[Trading] ${agentId}: priced ${localMarketId} 3-tier YES ${t1YesBid}¢/${t1YesAsk}¢ NO ${t1NoBid}¢/${t1NoAsk}¢ (${creates.length} orders)${inv}`);
 
     state.updatePrice(localMarketId, fairValueCents / 100, spreadCents / 100);
+    market.bestBid = t1YesBid;
+    market.bestAsk = t1YesAsk;
     agent.openOrders = tracked;
 
     broadcast({
@@ -330,7 +383,7 @@ export async function placeTrade(
   size: number,
   direction: "buy" | "sell" = "buy",
 ): Promise<boolean> {
-  if (!isApiHealthy()) return false;
+  // Skip circuit breaker for trades — they should attempt even if sync is rate-limited
 
   const market = state.markets.get(localMarketId);
   if (!market?.apiMarketId) {
@@ -356,14 +409,14 @@ export async function placeTrade(
   const agent = state.agents.get(agentId);
   if (!agent) return false;
 
-  // Cancel existing orders on this market before trading
+  // Cancel existing orders on this market before trading (batch in groups of 20)
   try {
     const existingOrders = await client.orders.allMine(market.apiMarketId);
     const openNonces = existingOrders
       .filter((o) => o.status === "open")
       .map((o) => o.nonce as `0x${string}`);
-    if (openNonces.length > 0) {
-      await client.orders.bulkCancel(openNonces);
+    for (let i = 0; i < openNonces.length; i += 20) {
+      await client.orders.bulkCancel(openNonces.slice(i, i + 20));
     }
   } catch {
     // Continue even if cancel fails
@@ -387,61 +440,69 @@ export async function placeTrade(
     const sellSize = Math.min(size, Math.floor(position.size), maxSellContracts);
     if (sellSize < 1) return false;
 
-    // Simulate sell to get realistic price
-    const sim = await simulateTrade(client, market.apiMarketId, outcome as "yes" | "no", sellSize);
-    let priceCents: number;
-
-    if (sim && sim.avgPrice > 0) {
-      priceCents = Math.round(sim.avgPrice);
-    } else {
-      // Fallback to orderbook
-      try {
-        const orderbook = await client.markets.orderbook(market.apiMarketId);
-        const bids = side === "YES" ? orderbook?.bids : orderbook?.asks;
-        priceCents = bids?.[0]?.price
-          ? Math.round(bids[0].price)
-          : market.fairValue
-            ? Math.round((side === "YES" ? market.fairValue : 1 - market.fairValue) * 100)
-            : 50;
-      } catch {
-        priceCents = market.fairValue ? Math.round((side === "YES" ? market.fairValue : 1 - market.fairValue) * 100) : 50;
-      }
-    }
+    // Market sell: price well below fair value to sweep the bid side
+    const fvCents = market.fairValue ? Math.round((side === "YES" ? market.fairValue : 1 - market.fairValue) * 100) : 50;
+    const priceCents = Math.max(5, fvCents - 15);
 
     try {
-      await client.orders.create({
+      const agentName = state.agents.get(agentId)?.name || agentId;
+      const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
+      const orderPrice = Math.max(1, Math.min(99, priceCents));
+
+      console.log(`[Trading] ${agentName}: placing sell ${sellSize} ${side} at ${orderPrice}¢ on ${localMarketId}`);
+
+      const result = await client.orders.create({
         marketId: market.apiMarketId!,
         outcome: outcome as "yes" | "no",
         side: "sell",
-        priceCents: Math.max(1, Math.min(99, priceCents)),
+        priceCents: orderPrice,
         size: sellSize,
       });
 
-      const price = priceCents / 100;
-      const proceeds = Math.round(sellSize * price * 100) / 100;
-      console.log(`[Trading] ${agentId}: SOLD ${sellSize} ${side} at ${priceCents}¢ ($${proceeds}) on ${localMarketId}`);
+      // Check actual fill from API response
+      const order = result.order;
+      const filledSize = order ? parseInt(order.filledSize, 10) : 0;
 
-      state.addTrade(localMarketId, agentId, side, -sellSize, price);
+      // Simulate fill for self-trade prevention (same mnemonic = no API match)
+      const sellFvCents = market.fairValue ? Math.round((side === "YES" ? market.fairValue : 1 - market.fairValue) * 100) : 50;
+      const shouldSimSellFill = filledSize === 0 && (
+        (side === "YES" && market.bestBid !== null && orderPrice <= market.bestBid) ||
+        (side === "NO" && market.bestAsk !== null && orderPrice <= (100 - market.bestAsk))
+      );
+      const effectiveSellFill = filledSize > 0 ? filledSize : (shouldSimSellFill ? sellSize : 0);
 
-      // Optimistically reduce local position so forceResolveCleanup doesn't re-fire
-      if (position) {
-        position.size = Math.max(0, position.size - sellSize);
+      if (effectiveSellFill > 0) {
+        const execPrice = filledSize > 0 ? orderPrice : sellFvCents;
+        state.logTrade({ agentId, marketId: localMarketId, type: "execution", side, direction: "sell", shares: effectiveSellFill, priceCents: execPrice });
+        state.addAction(agentId, "execution", `${agentName} sold ${effectiveSellFill} shares ${side} "${shortQ}" at ${execPrice}¢`);
+        console.log(`[Trading] ${agentName}: FILLED sell ${effectiveSellFill} ${side} at ${execPrice}¢ on ${localMarketId}${filledSize === 0 ? " (sim)" : ""}`);
+
+        const price = execPrice / 100;
+        state.addTrade(localMarketId, agentId, side, -effectiveSellFill, price);
+
+        if (position) {
+          position.size = Math.max(0, position.size - effectiveSellFill);
+        }
+        // Credit proceeds
+        agent.usdcBalance = (agent.usdcBalance ?? 0) + (effectiveSellFill * execPrice / 100);
+
+        broadcast({
+          type: "trade_executed", agentId, marketId: localMarketId, side, size: effectiveSellFill,
+          price: Math.round(price * 100) / 100, building: "pit", question: market.question,
+          tradeType: "execution", direction: "sell",
+        });
+        notifyBuildingEvent("pit");
+      } else {
+        state.logTrade({ agentId, marketId: localMarketId, type: "order", side, direction: "sell", shares: sellSize, priceCents: orderPrice });
+        state.addAction(agentId, "order", `${agentName} resting sell ${sellSize} shares ${side} "${shortQ}" at ${orderPrice}¢`);
+        console.log(`[Trading] ${agentName}: RESTING sell ${sellSize} ${side} at ${orderPrice}¢ on ${localMarketId} (no match)`);
+
+        broadcast({
+          type: "trade_executed", agentId, marketId: localMarketId, side, size: sellSize,
+          price: orderPrice / 100, building: "pit", question: market.question,
+          tradeType: "order", direction: "sell",
+        });
       }
-
-      broadcast({
-        type: "trade_executed",
-        agentId,
-        marketId: localMarketId,
-        side,
-        size: sellSize,
-        price: Math.round(price * 100) / 100,
-        building: "pit",
-        question: market.question,
-      });
-      notifyBuildingEvent("pit");
-
-      const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
-      state.addAction(agentId, `sold ${side}`, `$${proceeds} on ${shortQ}`);
 
       return true;
     } catch (err) {
@@ -458,38 +519,18 @@ export async function placeTrade(
     return false;
   }
 
-  // Simulate buy to preview fill price and slippage
-  const sim = await simulateTrade(client, market.apiMarketId, outcome as "yes" | "no", size);
-  let priceCents: number;
+  // Market order: price aggressively to guarantee fill against resting orders.
+  // Use fair value as the cost estimate for sizing, but price the order to cross.
+  const fvCents = market.fairValue ? Math.round((side === "YES" ? market.fairValue : 1 - market.fairValue) * 100) : 50;
+  // Price far above fair value to sweep the book — API fills at best available price
+  const priceCents = Math.min(95, fvCents + 15);
 
-  if (sim && sim.avgPrice > 0) {
-    // Check slippage — skip trade if too high
-    if (sim.slippage > 10) {
-      console.log(`[Trading] ${agentId}: skipping buy — slippage ${sim.slippage.toFixed(1)}% too high on ${localMarketId}`);
-      return false;
-    }
-    priceCents = Math.round(sim.avgPrice);
-  } else {
-    // Fallback to orderbook
-    try {
-      const orderbook = await client.markets.orderbook(market.apiMarketId);
-      if (side === "YES") {
-        priceCents = orderbook?.asks?.[0]?.price
-          ? Math.round(orderbook.asks[0].price)
-          : market.fairValue ? Math.round(market.fairValue * 100) : 50;
-      } else {
-        priceCents = orderbook?.bids?.[0]?.price
-          ? Math.round(100 - orderbook.bids[0].price)
-          : market.fairValue ? Math.round((1 - market.fairValue) * 100) : 50;
-      }
-    } catch {
-      priceCents = market.fairValue ? Math.round((side === "YES" ? market.fairValue : 1 - market.fairValue) * 100) : 50;
-    }
-  }
+  const agentName = state.agents.get(agentId)?.name || agentId;
+  console.log(`[Trading] ${agentName}: market buy ${side} at ${priceCents}¢ (fv=${fvCents}¢) on ${localMarketId}`);
 
-  // Dynamic buy cap: ~3% of account value, clamped to what we can afford
-  const maxBuyContracts = sizeFromAccount(agent, 0.03, priceCents, 5, 500);
-  const maxAffordable = Math.floor((balance / priceCents) * 100);
+  // Dynamic buy cap: ~5% of account value, sized using fair value (not crossing price)
+  const maxBuyContracts = sizeFromAccount(agent, 0.05, fvCents, 10, 200);
+  const maxAffordable = Math.floor((balance / fvCents) * 100);
   size = Math.min(size, maxAffordable, maxBuyContracts);
   if (size < 1) {
     console.log(`[Trading] ${agentId}: can't afford any contracts at ${priceCents}¢`);
@@ -497,34 +538,69 @@ export async function placeTrade(
   }
 
   try {
-    await client.orders.create({
+    const shortQ = market.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70);
+    const orderPrice = Math.max(1, Math.min(99, priceCents));
+
+    console.log(`[Trading] ${agentName}: placing buy ${size} ${side} at ${orderPrice}¢ on ${localMarketId}`);
+
+    const result = await client.orders.create({
       marketId: market.apiMarketId!,
       outcome: outcome as "yes" | "no",
       side: "buy",
-      priceCents: Math.max(1, Math.min(99, priceCents)),
+      priceCents: orderPrice,
       size,
     });
 
-    const price = priceCents / 100;
-    const cost = Math.round(size * price * 100) / 100;
-    console.log(`[Trading] ${agentId}: BUY ${size} ${side} at ${priceCents}¢ ($${cost}) on ${localMarketId}`);
+    // Check actual fill from API response
+    const order = result.order;
+    const filledSize = order ? parseInt(order.filledSize, 10) : 0;
 
-    state.addTrade(localMarketId, agentId, side, size, price);
+    // Self-trade prevention: all agents share the same mnemonic, so API won't match
+    // them against each other. Simulate fill if order crosses our pricer quotes.
+    const fillPrice = fvCents; // fill at fair value
+    const shouldSimFill = filledSize === 0 && (
+      (side === "YES" && market.bestAsk !== null && orderPrice >= market.bestAsk) ||
+      (side === "NO" && market.bestBid !== null && orderPrice >= (100 - market.bestBid))
+    );
+    const effectiveFill = filledSize > 0 ? filledSize : (shouldSimFill ? size : 0);
 
-    broadcast({
-      type: "trade_executed",
-      agentId,
-      marketId: localMarketId,
-      side,
-      size,
-      price: Math.round(price * 100) / 100,
-      building: "pit",
-      question: market.question,
-    });
-    notifyBuildingEvent("pit");
+    if (effectiveFill > 0) {
+      const execPrice = filledSize > 0 ? orderPrice : fillPrice;
+      state.logTrade({ agentId, marketId: localMarketId, type: "execution", side, direction: "buy", shares: effectiveFill, priceCents: execPrice });
+      state.addAction(agentId, "execution", `${agentName} bought ${effectiveFill} shares ${side} "${shortQ}" at ${execPrice}¢`);
+      console.log(`[Trading] ${agentName}: FILLED buy ${effectiveFill} ${side} at ${execPrice}¢ on ${localMarketId}${filledSize === 0 ? " (sim)" : ""}`);
 
-    const shortQ = market.question.replace(/^Will /, "").replace(/\?$/, "").slice(0, 70);
-    state.addAction(agentId, `bought ${side}`, `$${cost} on ${shortQ}`);
+      const price = execPrice / 100;
+      state.addTrade(localMarketId, agentId, side, effectiveFill, price);
+
+      // Update position
+      if (!agent.positions) agent.positions = [];
+      const existing = agent.positions.find(p => p.marketId === localMarketId && p.outcome.toLowerCase().includes(outcome));
+      if (existing) {
+        existing.size += effectiveFill;
+      } else {
+        agent.positions.push({ marketId: localMarketId, outcome: side, size: effectiveFill, avgPrice: price });
+      }
+      // Deduct cost
+      agent.usdcBalance = Math.max(0, (agent.usdcBalance ?? 0) - (effectiveFill * execPrice / 100));
+
+      broadcast({
+        type: "trade_executed", agentId, marketId: localMarketId, side, size: effectiveFill,
+        price: Math.round(price * 100) / 100, building: "pit", question: market.question,
+        tradeType: "execution", direction: "buy",
+      });
+      notifyBuildingEvent("pit");
+    } else {
+      state.logTrade({ agentId, marketId: localMarketId, type: "order", side, direction: "buy", shares: size, priceCents: orderPrice });
+      state.addAction(agentId, "order", `${agentName} resting buy ${size} shares ${side} "${shortQ}" at ${orderPrice}¢`);
+      console.log(`[Trading] ${agentName}: RESTING buy ${size} ${side} at ${orderPrice}¢ on ${localMarketId} (no match)`);
+
+      broadcast({
+        type: "trade_executed", agentId, marketId: localMarketId, side, size,
+        price: orderPrice / 100, building: "pit", question: market.question,
+        tradeType: "order", direction: "buy",
+      });
+    }
 
     return true;
   } catch (err) {

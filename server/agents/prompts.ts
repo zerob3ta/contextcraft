@@ -1,6 +1,8 @@
 import type { AgentState } from "../state";
 import type { Market, NewsItem } from "../state";
 import { state } from "../state";
+import { isContextEnabled } from "../context-api/client";
+import { getQuotedMarkets } from "./market-maker";
 
 export function buildSystemPrompt(agent: AgentState): string {
   const roleInstructions = ROLE_PROMPTS[agent.role];
@@ -65,59 +67,62 @@ export function buildUserPrompt(
       parts.push(`EST. ACCOUNT VALUE (balance + positions at mid): ~$${totalAccount.toFixed(0)}`);
     }
     if (agent.positions && agent.positions.length > 0) {
-      parts.push("YOUR POSITIONS (YES = you profit if it happens, NO = you profit if it doesn't):");
-      for (const p of agent.positions.slice(0, 8)) {
+      // Filter out positions on resolved markets — they're done
+      const livePositions = agent.positions.filter((p) => {
         const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
-        const label = m ? m.question.slice(0, 90) : "unknown market";
-        const dollarValue = Math.round(p.size * p.avgPrice * 100) / 100;
-        const entryPriceCents = Math.round(p.avgPrice * 100);
+        if (!m) return true; // unknown market, show it
+        return !(m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
+          m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed");
+      });
+      if (livePositions.length > 0) {
+        parts.push("YOUR POSITIONS (YES = you profit if it happens, NO = you profit if it doesn't):");
+        for (const p of livePositions.slice(0, 8)) {
+          const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
+          const label = m ? m.question.slice(0, 90) : "unknown market";
+          const dollarValue = Math.round(p.size * p.avgPrice * 100) / 100;
+          const entryPriceCents = Math.round(p.avgPrice * 100);
 
-        // Current market price for P&L
-        let nowTag = "";
-        if (m && m.fairValue !== null) {
-          const isYes = p.outcome.toUpperCase() === "YES";
-          const currentPrice = isYes ? Math.round(m.fairValue * 100) : Math.round((1 - m.fairValue) * 100);
-          const pnlCents = currentPrice - entryPriceCents;
-          nowTag = ` | now ${currentPrice}¢ (${pnlCents >= 0 ? "+" : ""}${pnlCents}¢)`;
-        }
-
-        // Flag positions on resolving/resolved markets
-        let resTag = "";
-        if (m && (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
-            m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed")) {
-          const outcomeStr = m.outcome === 1 ? "YES" : m.outcome === 0 ? "NO" : "?";
-          const isWinning = p.outcome.toUpperCase() === outcomeStr;
-          resTag = isWinning ? " ✅WINNING" : " ❌LOSING→SELL NOW";
-        }
-
-        // Time decay warning for YES positions approaching deadline
-        let decayTag = "";
-        if (m && m.deadline && !resTag && p.outcome.toUpperCase() === "YES") {
-          const remaining = new Date(m.deadline).getTime() - Date.now();
-          if (remaining <= 0) {
-            decayTag = " ⏰EXPIRED→sell";
-          } else if (remaining < 3600_000) {
-            decayTag = ` ⏰${Math.round(remaining / 60_000)}min left→heavy decay`;
-          } else if (remaining < 6 * 3600_000) {
-            decayTag = ` ⏰${Math.round(remaining / 3600_000)}h left→decaying`;
+          // Current market price for P&L
+          let nowTag = "";
+          if (m && m.fairValue !== null) {
+            const isYes = p.outcome.toUpperCase() === "YES";
+            const currentPrice = isYes ? Math.round(m.fairValue * 100) : Math.round((1 - m.fairValue) * 100);
+            const pnlCents = currentPrice - entryPriceCents;
+            nowTag = ` | now ${currentPrice}¢ (${pnlCents >= 0 ? "+" : ""}${pnlCents}¢)`;
           }
-        }
 
-        parts.push(`  - ${p.outcome.toUpperCase()} ${Math.round(p.size)}x on "${label}" (entry ${entryPriceCents}¢, ~$${dollarValue})${nowTag}${resTag}${decayTag}`);
+          // Time decay warning for YES positions approaching deadline
+          let decayTag = "";
+          if (m && m.deadline && p.outcome.toUpperCase() === "YES") {
+            const remaining = new Date(m.deadline).getTime() - Date.now();
+            if (remaining <= 0) {
+              decayTag = " ⏰EXPIRED→sell";
+            } else if (remaining < 3600_000) {
+              decayTag = ` ⏰${Math.round(remaining / 60_000)}min left→heavy decay`;
+            } else if (remaining < 6 * 3600_000) {
+              decayTag = ` ⏰${Math.round(remaining / 3600_000)}h left→decaying`;
+            }
+          }
+
+          parts.push(`  - ${p.outcome.toUpperCase()} ${Math.round(p.size)}x on "${label}" (entry ${entryPriceCents}¢, ~$${dollarValue})${nowTag}${decayTag}`);
+        }
       }
     }
     if (agent.openOrders && agent.openOrders.length > 0) {
-      parts.push("YOUR OPEN ORDERS:");
-      for (const o of agent.openOrders.slice(0, 6)) {
+      // Filter out orders on resolved markets
+      const liveOrders = agent.openOrders.filter((o) => {
         const m = state.markets.get(o.marketId);
-        const label = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70) : o.marketId;
-        // Flag orders on resolving markets
-        let resTag = "";
-        if (m && (m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
-            m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed")) {
-          resTag = " ⚠️CANCEL→market resolving";
+        if (!m) return true;
+        return !(m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
+          m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed");
+      });
+      if (liveOrders.length > 0) {
+        parts.push("YOUR OPEN ORDERS:");
+        for (const o of liveOrders.slice(0, 6)) {
+          const m = state.markets.get(o.marketId);
+          const label = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 70) : o.marketId;
+          parts.push(`  - ${o.side} ${o.size} contracts at ${o.price}¢ on "${label}"`);
         }
-        parts.push(`  - ${o.side} ${o.size} contracts at ${o.price}¢ on "${label}"${resTag}`);
       }
     }
   }
@@ -162,10 +167,10 @@ export function buildUserPrompt(
       }
     }
 
-    // Recently finished games (last hour)
+    // Recently finished games (last hour) — for context only, NOT for market creation
     const recentFinals = sportsSlate.filter((g) => g.status === "post");
     if (recentFinals.length > 0) {
-      parts.push("\nFINAL SCORES:");
+      parts.push("\nFINAL SCORES (already finished — DO NOT create markets for these):");
       for (const g of recentFinals.slice(0, 6)) {
         parts.push(`- [${g.league.toUpperCase()}] ${g.shortName} ${g.awayScore}-${g.homeScore} (Final)`);
       }
@@ -205,73 +210,40 @@ export function buildUserPrompt(
   }
 
   if (markets.length > 0) {
-    // Split markets into active vs resolving/resolved
+    // Filter out resolved/resolving markets entirely — they're done, no action possible
     const isResolving = (m: Market) =>
       m.resolutionStatus === "pending" || m.resolutionStatus === "resolved" ||
       m.apiStatus === "pending" || m.apiStatus === "resolved" || m.apiStatus === "closed";
 
-    const resolving = markets.filter(isResolving);
-    const active = markets.filter((m) => !isResolving(m));
-
-    // ── RESOLVING/RESOLVED MARKETS (shown first, prominently) ──
-    if (resolving.length > 0) {
-      parts.push("\n🚨 RESOLVING/RESOLVED MARKETS — PROPOSAL means the oracle has decided the outcome. It WILL resolve this way. You have NO inside information to disagree.");
-      parts.push("ACTION REQUIRED: cancel all orders, sell losing positions at ANY price, hold winning positions.");
-      for (const m of resolving) {
-        const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 80);
-        const outcomeStr = m.outcome === 1 ? "YES (it happened)" : m.outcome === 0 ? "NO (it didn't happen)" : "?";
-        const statusLabel = (m.apiStatus === "resolved" || m.apiStatus === "closed" || m.resolutionStatus === "resolved")
-          ? "RESOLVED" : "PROPOSAL";
-        parts.push(`- ${shortTitle} [${m.id}] — ${statusLabel}→${outcomeStr}`);
-      }
-
-      // Check if this agent has exposure on resolving markets
-      if (agent.role === "pricer" || agent.role === "trader") {
-        const resolvingIds = new Set(resolving.map((m) => m.id));
-        const resolvingApiIds = new Set(resolving.filter((m) => m.apiMarketId).map((m) => m.apiMarketId));
-
-        // Flag open orders on resolving markets
-        const dangerOrders = agent.openOrders?.filter(
-          (o) => resolvingIds.has(o.marketId) || resolvingApiIds.has(o.marketId)
-        ) || [];
-        if (dangerOrders.length > 0) {
-          parts.push(`⚠️ YOU HAVE ${dangerOrders.length} OPEN ORDER(S) ON RESOLVING MARKETS — use cancel_orders NOW.`);
-        }
-
-        // Flag positions on resolving markets
-        const dangerPositions = agent.positions?.filter(
-          (p) => resolvingIds.has(p.marketId) || resolvingApiIds.has(p.marketId)
-        ) || [];
-        if (dangerPositions.length > 0) {
-          parts.push(`⚠️ YOU HAVE POSITIONS ON RESOLVING MARKETS:`);
-          for (const p of dangerPositions) {
-            const m = resolving.find(
-              (rm) => rm.id === p.marketId || rm.apiMarketId === p.marketId
-            );
-            const outcomeStr = m?.outcome === 1 ? "YES" : m?.outcome === 0 ? "NO" : "?";
-            const isWinning = p.outcome.toUpperCase() === outcomeStr;
-            const label = m ? m.question.slice(0, 70) : "unknown";
-            const action = isWinning ? "HOLD (winning side)" : "SELL IMMEDIATELY (losing side)";
-            parts.push(`  - ${p.outcome.toUpperCase()} ${Math.round(p.size)} contracts on "${label}" → ${action}`);
-          }
-        }
-      }
-    }
+    const onChain = isContextEnabled();
+    const active = markets.filter((m) => {
+      if (isResolving(m)) return false;
+      // When on-chain, skip markets with no API backing — they're phantom/failed
+      if (onChain && !m.apiMarketId) return false;
+      return true;
+    });
 
     // ── ACTIVE MARKETS ──
     if (active.length > 0) {
-      // Interleave internal and external markets so agents see the full landscape
-      const ours = active.filter((m) => m.apiMarketId && !m.isExternal);
-      const external = active.filter((m) => m.apiMarketId && m.isExternal);
-      const local = active.filter((m) => !m.apiMarketId);
-      // Round-robin interleave ours and external, then append local-only
-      const interleaved: typeof active = [];
-      const maxLen = Math.max(ours.length, external.length);
-      for (let i = 0; i < maxLen; i++) {
-        if (i < ours.length) interleaved.push(ours[i]);
-        if (i < external.length) interleaved.push(external[i]);
+      let ordered: typeof active;
+      const TRADE_COOLDOWN_MS = 3 * 60_000;
+      if (agent.role === "trader") {
+        // Exclude recently-traded markets and shuffle to prevent fixation
+        const available = active.filter((m) => state.getMarketCooldownMs(agent.id, m.id) > TRADE_COOLDOWN_MS);
+        ordered = [...available].sort(() => Math.random() - 0.5).slice(0, 20);
+      } else {
+        // Interleave internal and external markets so agents see the full landscape
+        const ours = active.filter((m) => !m.isExternal);
+        const external = active.filter((m) => m.isExternal);
+        // Round-robin interleave ours and external
+        const interleaved: typeof active = [];
+        const maxLen = Math.max(ours.length, external.length);
+        for (let i = 0; i < maxLen; i++) {
+          if (i < ours.length) interleaved.push(ours[i]);
+          if (i < external.length) interleaved.push(external[i]);
+        }
+        ordered = interleaved.slice(0, 25);
       }
-      const ordered = [...interleaved, ...local].slice(0, 25);
 
       parts.push("\nACTIVE MARKETS (use the ID in brackets for actions):");
       for (const m of ordered) {
@@ -312,9 +284,17 @@ export function buildUserPrompt(
           }
         }
 
-        // Oracle qualitative context for pricers and traders
+        // Analyst odds for pricers and traders — primary signal
+        let analystTag = "";
+        if ((agent.role === "pricer" || agent.role === "trader") && m.analystOdds) {
+          const a = m.analystOdds;
+          const analystName = state.agents.get(a.analystId)?.name || a.analystId;
+          analystTag = ` | ANALYST: ${analystName} says ${a.probability}% (${a.confidence}) — "${a.summary}"`;
+        }
+
+        // Oracle qualitative context for pricers and traders (skip if analyst odds exist)
         let oracleTag = "";
-        if ((agent.role === "pricer" || agent.role === "trader") && m.oracleSummary) {
+        if ((agent.role === "pricer" || agent.role === "trader") && m.oracleSummary && !m.analystOdds) {
           oracleTag = ` | oracle: "${m.oracleSummary}"`;
           if (m.oracleConfidence) oracleTag += ` (${m.oracleConfidence})`;
         }
@@ -354,8 +334,89 @@ export function buildUserPrompt(
           }
         }
 
-        parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${deadlineTag}${bookTag}${oracleTag}${historyTag}${attrTag}`);
+        parts.push(`- ${shortTitle} [${m.id}] — ${priceStr}, ${tradeCount} trades${apiTag}${deadlineTag}${bookTag}${analystTag}${oracleTag}${historyTag}${attrTag}`);
       }
+    }
+  }
+
+  // Creator market ideas backlog
+  if (agent.role === "creator" && agent.marketIdeasBacklog && agent.marketIdeasBacklog.length > 0) {
+    parts.push("\nYOUR MARKET IDEAS BACKLOG (pick from these when creating, or add new ones):");
+    for (const idea of agent.marketIdeasBacklog) {
+      const ago = Math.round((Date.now() - idea.addedAt) / 60_000);
+      parts.push(`  - "${idea.idea}" (source: ${idea.source}, ${ago}min ago)`);
+    }
+  }
+
+  // Show THIS pricer's assigned markets that need attention
+  // Each pricer only sees their own book — no duplication
+  if (agent.role === "pricer") {
+    const myMarkets = getQuotedMarkets(agent.id);
+    const myNeedWork = myMarkets
+      .map((mid) => state.markets.get(mid))
+      .filter((m): m is NonNullable<typeof m> => !!m && (m.bestBid === null || m.bestAsk === null));
+
+    if (myNeedWork.length > 0) {
+      parts.push(`\n⚠️ YOUR MARKETS NEED PRICING (${myNeedWork.length} assigned to you):`);
+      for (const m of myNeedWork.slice(0, 5)) {
+        const shortTitle = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 80);
+        const oracleTag = m.oracleSummary ? ` — oracle: "${m.oracleSummary}"` : "";
+        const apiPrice = m.fairValue !== null ? ` — API price: ${Math.round(m.fairValue * 100)}¢` : "";
+        parts.push(`  - "${shortTitle}" [${m.id}]${oracleTag}${apiPrice}`);
+      }
+    } else {
+      parts.push(`\n✅ YOUR ${myMarkets.length} MARKETS COVERED — analysts + algo MM handling quotes. Idle unless breaking news changes your view.`);
+    }
+  }
+
+  // Recent pricing events for traders
+  // Trade journal — recent orders, executions, cancellations for this trader
+  if (agent.role === "trader") {
+    const journal = state.getTradeJournal(agent.id, 10);
+    if (journal.length > 0) {
+      parts.push("\nYOUR RECENT TRADE JOURNAL:");
+      for (const entry of journal) {
+        const m = state.markets.get(entry.marketId);
+        const shortQ = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 50) : entry.marketId;
+        const ago = Math.round((Date.now() - entry.ts) / 60_000);
+        if (entry.type === "cancel") {
+          parts.push(`  - [CANCEL] "${shortQ}" ${ago}min ago${entry.reason ? ` — ${entry.reason}` : ""}`);
+        } else {
+          const verb = entry.type === "order" ? "ORDER" : "EXEC";
+          parts.push(`  - [${verb}] ${entry.direction} ${entry.shares} ${entry.side} "${shortQ}" at ${entry.priceCents}¢ ${ago}min ago`);
+        }
+      }
+    }
+  }
+
+  if (agent.role === "trader" && state.recentPricingEvents.length > 0) {
+    parts.push("\nRECENT PRICING EVENTS (watch for signals):");
+    for (const evt of state.recentPricingEvents.slice(0, 8)) {
+      const pricer = state.agents.get(evt.agentId);
+      const m = state.markets.get(evt.marketId);
+      if (!m) continue;
+      const shortQ = m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 60);
+      const ago = Math.round((Date.now() - evt.ts) / 60_000);
+      parts.push(`  - ${pricer?.name || evt.agentId} priced "${shortQ}" at ${Math.round(evt.fairValue * 100)}¢ (spread ${Math.round(evt.spread * 100)}¢) ${ago}min ago`);
+    }
+  }
+
+  // Other traders' positions for traders
+  if (agent.role === "trader") {
+    const otherTraderPositions: string[] = [];
+    for (const [, a] of state.agents) {
+      if (a.role === "trader" && a.id !== agent.id && a.positions && a.positions.length > 0) {
+        const posStr = a.positions.slice(0, 3).map((p) => {
+          const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
+          const label = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 40) : "?";
+          return `${p.outcome.toUpperCase()} ${Math.round(p.size)}x "${label}"`;
+        }).join(", ");
+        otherTraderPositions.push(`  - ${a.name}: ${posStr}`);
+      }
+    }
+    if (otherTraderPositions.length > 0) {
+      parts.push("\nOTHER TRADERS' POSITIONS:");
+      parts.push(...otherTraderPositions);
     }
   }
 
@@ -409,144 +470,142 @@ export function buildUserPrompt(
 }
 
 const ROLE_PROMPTS: Record<string, string> = {
-  creator: `As a CREATOR, your job is to spot newsworthy topics and create prediction markets.
+  creator: `As a CREATOR, you design prediction markets about FUTURE events. You scan news, debate ideas, and curate a backlog of market ideas.
 
-RULES:
-- You CANNOT trade or price markets — only create them
-- Don't create markets for things that already happened
-- Focus on your specialty but react to big breaking news too
-- IMPORTANT: Use today's date for time grounding. We are in 2026. Do NOT reference 2024 or 2025 as future.
-- Market topics should be specific and resolvable (e.g. "Will X happen by [date]?")
-- PRIORITY: When a game slate is available, create markets for SPECIFIC GAMES first (e.g. "Will Lakers beat Celtics tonight?", "Will Rangers score 4+ goals?"). Each game is its own market. Do NOT create vague aggregate markets like "how many upsets" — create matchup markets.
-- Quality over quantity. Only create a market if it's genuinely interesting and tradeable. Ask yourself: would a real person want to bet on this? Is the outcome clear and resolvable?
-- ONE market per game or event. Do NOT create a "will X beat Y" AND a "will X cover the spread" for the same matchup. Pick the single most interesting angle.
-- Check the ACTIVE MARKETS list — if a market already exists for a game/event, do NOT create another one for the same matchup.
-- It's fine to speak, socialize, or move instead of creating if nothing compelling is happening. In fact, prefer chatting unless you have a genuinely unique market idea.
-- RESEARCH: When in the newsroom, you can use the "research" action to look things up before creating. Use it to check scores, search the web, search X/Twitter, or scrape a URL. Results appear in your next prompt. ALWAYS research before creating sports markets to verify game status.`,
+WORKFLOW:
+- Move between NEWSROOM (scanning, debating, research) and WORKSHOP (creating). That's your world.
+- Use "add_idea" freely to save market ideas to your backlog. Pick from the backlog when creating.
+- Use "research" to verify facts before creating — especially for sports.
 
-  pricer: `As a PRICER (market maker), your job is to provide liquidity on both sides of prediction markets by setting accurate fair values and competitive spreads.
+CRITICAL RULES — VIOLATIONS WILL BE REJECTED:
+- Markets MUST be about FUTURE events. NEVER create a market about something that already happened.
+- "FINAL SCORES" in the sports slate = ALREADY HAPPENED. Do NOT create markets for finished games.
+- Only create markets for games listed under "UPCOMING GAMES" — those haven't started yet.
+- Markets must start with "Will..." and be specific, measurable, and time-bound.
+- You CANNOT trade or price markets — only create them.
+- ONE market per game/event. Check ACTIVE MARKETS — don't duplicate.
+- Quality over quantity. Idle or add_idea if nothing compelling is happening.
+- IMPORTANT: We are in 2026. Do NOT reference 2024 or 2025 as future.
 
-MECHANICS:
-- "post_price" sets your fair value and spread → places orders on BOTH YES and NO orderbooks.
-- Every post_price CANCELS your previous orders and replaces them.
-- fairValue (0.01–0.99) is the YES probability. 0.65 = 65% YES. NO price = (1 - fairValue).
-- spread (0.02–0.15) is your edge — the gap between your bid and ask.
-- You CANNOT create markets or trade — only price them.
-- Price unpriced markets first, then reprice existing ones as conditions change.
+WHAT MAKES A GOOD MARKET:
+- Specific upcoming game: "Will the Lakers beat the Celtics tonight?"
+- Timely news event: "Will Trump announce new tariffs this week?"
+- Measurable threshold: "Will Bitcoin reach $120K by Friday?"
+- NOT: vague aggregates, past events, unrealistic targets, or generic topics.
 
-HOW TO ESTIMATE FAIR VALUE — follow this framework for EVERY market you price:
+BAD MARKETS (never create these):
+- Past events: "Did Kansas win?" — the game already happened
+- Unrealistic: targets too far from current price to be interesting
+- Vague: "Will there be upsets tonight?" — not measurable
+- Duplicate: anything already in ACTIVE MARKETS`,
 
-1. ANCHOR: Start with the strongest available signal:
-   - Sports with a spread: Convert the sportsbook spread to an implied probability. A -3.5 spread ≈ 63% favorite. A -7 spread ≈ 75%. Use the RELEVANT GAMES data.
-   - Oracle summary available: Read it carefully. If oracle says "high confidence" and gives a directional view, anchor near that view (but not blindly — oracle can be wrong).
-   - No strong signal: Start at 50¢ and adjust from there.
+  pricer: `As a PRICER, you set the FIRST price on brand-new markets. Your algorithmic market maker then takes over all ongoing quoting automatically.
 
-2. ADJUST FOR EVIDENCE — move your anchor up or down:
-   - Breaking news directly about this event? Strong adjustment (±10-20¢).
-   - Oracle summary leans one way? Moderate adjustment (±5-15¢).
-   - Live score data (game in progress)? Adjust heavily based on score + time remaining. A team up 15 in the 4th quarter ≈ 95%+.
-   - Price trend (↑/↓) from other agents? Small adjustment (±2-5¢). Remember: the trend may just be one agent's view, check attribution.
+YOUR JOB:
+- Check "NEW MARKETS — NEED INITIAL PRICE" — these have NEVER been priced. Set their first fair value + spread.
+- Once you post_price, your algo MM takes over: requoting, inventory skew, time decay, everything.
+- Markets already showing a price (YES/NO with ¢ values) are HANDLED. Do NOT re-price them.
+- Idle when there are no new markets to price. This is the normal state — your MM is working.
+- Use "cancel_orders" only if something looks seriously wrong.
 
-3. APPLY TIME DECAY — the deadline is critical:
-   - If >24h remain and event is plausible: Price normally based on evidence.
-   - If 6-24h remain, no resolution yet: Decay YES toward 0. Multiply your base estimate by ~0.7-0.9 depending on likelihood.
-   - If 1-6h remain, no resolution: Heavy decay. Multiply by ~0.3-0.6. The event window is closing.
-   - If <1h remains: Unless resolution is imminent or already happening, YES should be <10¢.
-   - ⏰EXPIRED: Price at 1-2¢ or cancel orders entirely.
-   - Exception: If the event is ALREADY HAPPENING (live game, vote in progress), time decay doesn't apply — price on current state.
+CRITICAL: Only use post_price on markets listed under "NEW MARKETS — NEED INITIAL PRICE". All other markets are already managed by your algo MM. Do NOT re-price them.
 
-4. SET YOUR SPREAD based on confidence:
-   - High confidence (strong evidence, multiple signals agree): Tight spread 0.02-0.04
-   - Medium confidence (some evidence, oracle aligns): Medium spread 0.04-0.08
-   - Low confidence (sparse info, conflicting signals): Wide spread 0.08-0.15
-   - UNPRICED market with no info: Start wide (0.10-0.15) and tighten as you learn.
+HOW TO SET INITIAL FAIR VALUE:
 
-5. MANAGE INVENTORY:
-   - Check YOUR POSITIONS. If you're long YES, shade your fair value DOWN slightly (1-3¢) to attract sellers.
-   - If you're long NO, shade your fair value UP slightly to attract YES buyers.
-   - The goal: don't accumulate one-sided risk. Use your quotes to rebalance.
+1. ANCHOR on ANALYST ODDS (your starting point):
+   - ANALYST tags show probability estimates from our quantitative analysts (Sigma & Edge).
+   - Use analyst odds as your primary anchor — they use volatility models, base rates, and time scaling.
+   - Only deviate from analyst odds with strong conviction (breaking news, live game state, clear error).
 
-EVALUATING YOUR CURRENT POSITIONS & ORDERS:
-- Check each open order against the current bid/ask shown in the market listing. If your order is >10¢ from the current fair value, it's stale — reprice or cancel.
-- Check each position: has the thesis changed since you entered? Has news invalidated it? Has the deadline moved closer with no resolution? If yes → reprice to reflect new view, or cancel to stop providing liquidity.
-- If oracle confidence changed (e.g., low→high) or new breaking news arrived, your old prices are likely wrong. Reprice immediately.
+2. ADJUST for context: Breaking news (±10-20¢), live scores (heavy adjust), book imbalance (±5¢).
 
-ATTRIBUTION:
-- "quoted by Shark, you" = the price reflects YOUR quotes, not anonymous market wisdom. Don't anchor to your own price.
-- "last: Whale YES 500x" = one agent's trade, not crowd consensus. Weight it lightly.
-- Multiple quoters + diverse trades = stronger price signal. Single quoter = just one opinion.
+3. TIME DECAY: >24h = normal. 6-24h = multiply by 0.7-0.9. 1-6h = 0.3-0.6. <1h = YES <10¢.
+   Exception: Events currently in progress — price on current state.
 
-RESOLUTION: If a market is RESOLVING/RESOLVED:
-1. Cancel ALL your orders on that market using cancel_orders — HIGHEST PRIORITY.
-2. Do NOT place new orders on it.
+4. SPREAD: Analyst high confidence → 0.03-0.05, medium → 0.05-0.08, low/no analyst → 0.08-0.15.
 
-RESEARCH: Use the "research" action to look up scores, search web/X, or scrape URLs before pricing. Results appear in your next prompt. ALWAYS research sports markets before pricing to get live scores.`,
+WHAT THE ALGO HANDLES AUTOMATICALLY (you don't need to do this):
+- Requoting after fills (inventory-based skew)
+- Widening spread when inventory gets heavy
+- Time decay spread widening as expiry approaches
+- Pulling quotes on resolved/expired markets
 
-  trader: `As a TRADER, your job is to take positions on prediction markets — buy when you see value, sell when the thesis changes.
+ACTIONS:
+- "post_price": Set initial fair value on a market YOU haven't quoted yet (fairValue 0.01-0.99, spread 0.02-0.15)
+- "cancel_orders": Pull all liquidity from a market
+- "research": Look up info before pricing
+- "speak": Discuss markets in the newsroom
+- "idle": All markets are quoted — nothing to do
+
+MOVEMENT: Newsroom for research, exchange to check your book.
+RESEARCH: ALWAYS research sports markets before pricing.`,
+
+  trader: `As a TRADER, you TRADE. Your job is to take positions on markets you have a view on. You should be trading EVERY TICK unless you truly have no opinion.
 
 MECHANICS:
 - side: "YES" = you think the event WILL happen. "NO" = you think it WON'T. direction: "buy" or "sell".
 - Every trade CANCELS your existing orders on that market first, then places the new one.
-- size = number of CONTRACTS (not dollars). Each contract costs (price in ¢) cents. Example: 50 contracts at 60¢ = $30.
+- size = number of CONTRACTS (not dollars). Keep size between 10-100. The system will cap it to what you can afford.
 - You CANNOT create or price markets — only trade.
 
-HOW TO FIND EDGE — follow this framework for EVERY trade decision:
+CRITICAL RULES:
+- You MUST trade on most ticks. Only idle if you genuinely have zero conviction on any market.
+- Markets you traded recently are HIDDEN — look at what's available, don't fixate.
+- Spread trades across multiple markets. Diversify.
+- If your order fails, do NOT retry the same trade.
 
-1. ESTIMATE TRUE PROBABILITY (same as a pricer would):
-   - Sports with a spread: Convert the sportsbook spread to implied probability. -3.5 ≈ 63%, -7 ≈ 75%. Use RELEVANT GAMES data.
-   - Oracle summary: Read carefully. High-confidence oracle is a strong signal but not gospel.
-   - Breaking news: If news directly changes the probability, adjust your estimate significantly.
-   - Live scores: A team up 15 in the 4th ≈ 95%+. Halftime leads are less decisive (maybe +15-20% vs. pre-game).
-   - No strong signal: Your estimate is ~50%. Don't trade without edge.
+FINDING EDGE:
+- If analyst odds differ from market price by ≥5¢, TRADE IT. Don't overthink.
+- If news just broke that affects a market, TRADE IT immediately.
+- When in doubt, pick the market with the biggest gap between analyst odds and market price.
+- Don't waste ticks researching — you have analyst reports and news already. ACT on them.
+- Research only if you have NO information about any market and need to form a view.
 
-2. COMPARE TO MARKET PRICE — only trade when there's a gap:
-   - Your estimate vs. market YES price = your edge. Example: you think 75%, market says 60¢ → 15¢ edge → BUY YES.
-   - Minimum edge to trade: 8-10¢ for high confidence, 15¢+ for low confidence. Do NOT trade 2-3¢ edges — fees and slippage eat that.
-   - If market price already reflects your view (within 5¢), there's no trade. Idle.
-   - Check bid/ask spread: If the spread is wide (>8¢), you're paying a lot to cross. Factor that into your edge calculation.
+RISK MANAGEMENT:
+- Risk 3-5% of account per trade. Keep size 10-100 contracts.
+- Cut losers: bought at 60¢ now 35¢ → sell.
+- Let winners run: bought at 40¢ now 70¢ → consider profit.
+- Time decay: <6h to deadline → YES decays fast, consider selling.
 
-3. APPLY TIME DECAY before buying YES:
-   - If >24h remain and event is plausible: Normal pricing, trade on edge.
-   - If 6-24h remain, no resolution yet: YES should be decayed. If market hasn't decayed, that's a SHORT opportunity (buy NO or sell YES).
-   - If 1-6h remain, no resolution: YES should be heavily decayed. Fair value for an unresolved event might be 15-30¢ even if the event is "likely eventually."
-   - If <1h remains: Unless resolution is imminent, YES should be <10¢. If it's trading higher, that's edge for NO.
-   - ⏰EXPIRED: YES is near worthless. Sell any YES position immediately.
-   - Exception: Events currently in progress (live game, vote happening) — price on current state, not time alone.
+BIAS TOWARD ACTION: When you see a market with analyst odds significantly different from the price, your DEFAULT should be to trade, not to research or idle. You are a trader, not a researcher.
 
-4. SIZE YOUR TRADES proportionally:
-   - Risk ~2-5% of your ACCOUNT VALUE per trade, not your full balance.
-   - High conviction (multiple signals align, 15¢+ edge): Larger size, up to 5%.
-   - Medium conviction (one strong signal, 10¢ edge): Moderate size, ~2-3%.
-   - Low conviction (weak edge, speculative): Small size, ~1-2%. Or just skip it.
-   - NEVER go all-in on one market. Diversify across markets.
+RESOLUTION: Cancel all orders, sell losing positions, do NOT buy more.
 
-5. MANAGE YOUR BOOK — evaluate existing positions every tick:
-   - Has the thesis changed? New breaking news, oracle update, score change → reassess.
-   - Has the market moved toward your target? If you bought YES at 40¢ and it's now 70¢, consider taking profit (sell).
-   - Is time decaying your position? If you hold YES and the deadline is approaching with no resolution, your position is losing value every hour. Sell before it decays further.
-   - Is the position a loser? If you bought YES at 60¢ and it's now 35¢ with no catalyst to reverse, cut the loss. Don't hold and hope.
-   - Don't buy more of something you're already max long on. Consider selling instead.
+MOVEMENT: Pit for trading, newsroom for research, exchange to check prices directly.
 
-ATTRIBUTION:
-- "quoted by Shark" = Shark is making the market. The price is Shark's view, not the crowd's.
-- "last: Degen NO 100x" = one agent's trade, not consensus. Weight lightly.
-- Multiple quoters + diverse trades = stronger price signal.
+RESEARCH: Use "research" to look up scores, search web/X. Results appear in your next prompt.`,
 
-RESOLUTION: If a market is RESOLVING/RESOLVED:
-1. Cancel ALL your orders using cancel_orders — HIGHEST PRIORITY.
-2. SELL any positions marked ❌LOSING — these will be worthless.
-3. Do NOT buy more.
+  analyst: `As an ANALYST, you compute fair probabilities for prediction markets using quantitative models.
 
-RESEARCH: Use "research" to look up scores, search web/X, or scrape URLs. Results appear in your next prompt.`,
+YOUR JOB:
+- Analyze UNANALYZED markets by computing probability estimates
+- Use "post_analysis" to publish your odds — pricers use these to set initial prices
+- Your models run automatically (volatility models, base rates, time scaling)
+- You add qualitative color via your summary
+
+RULES:
+- You CANNOT trade, price, or create markets — only analyze
+- Focus on your specialty: ${"{"}specialty{"}"}
+- One market at a time. Quality over speed.
+- Idle when all markets have fresh analysis.
+
+ACTIONS:
+- "post_analysis": Publish your probability estimate for a market
+- "speak": Discuss findings in the newsroom
+- "research": Look up additional info
+- "move": Move between buildings
+- "idle": Nothing needs analysis right now
+
+MOVEMENT: Newsroom (primary), Exchange (secondary) — you're a researcher who publishes findings.`,
 };
 
 const ACTION_EXAMPLES: Record<string, string> = {
-  creator: `{"action":"create_market","topic":"Bitcoin ETF inflows hitting new record, question about BTC 200K"}
-{"action":"research","query":"Lakers Celtics","source":"sports"}
-{"action":"research","query":"bitcoin ETF inflows","source":"web"}
-{"action":"research","query":"bitcoin sentiment","source":"x"}
-{"action":"speak","message":"This could be huge!","emotion":"excited"}
-{"action":"move","destination":"newsroom","reason":"Checking breaking crypto news"}
+  creator: `{"action":"create_market","topic":"Upcoming Lakers vs Celtics game tonight — will Lakers win?"}
+{"action":"add_idea","idea":"Will Fed cut rates at next FOMC meeting?","source":"Reuters headline about inflation"}
+{"action":"add_idea","idea":"Will Rangers beat Islanders tonight?","source":"NHL slate — game at 7pm"}
+{"action":"research","query":"Blackhawks Jazz tonight","source":"sports"}
+{"action":"research","query":"trump tariffs latest","source":"web"}
+{"action":"speak","message":"Interesting slate tonight — lots of good matchups to create markets for.","emotion":"neutral"}
 {"action":"idle"}`,
 
   pricer: `{"action":"post_price","marketId":"M1","fairValue":0.35,"spread":0.04}
@@ -557,11 +616,17 @@ const ACTION_EXAMPLES: Record<string, string> = {
 {"action":"idle"}`,
 
   trader: `{"action":"trade","marketId":"M1","side":"YES","size":50,"direction":"buy"}
+{"action":"trade","marketId":"M5","side":"NO","size":30,"direction":"buy"}
 {"action":"trade","marketId":"M1","side":"YES","size":30,"direction":"sell"}
-{"action":"cancel_orders","marketId":"M2"}
-{"action":"research","query":"Fed rate decision","source":"web"}
-{"action":"research","query":"$BTC sentiment","source":"x"}
 {"action":"speak","message":"Cutting my position — thesis invalidated.","emotion":"cautious"}
+{"action":"research","query":"Fed rate decision","source":"web"}
+{"action":"idle"}
+
+PREFER "trade" over all other actions. Only research if you have NO information. Only idle if every market looks fairly priced.`,
+
+  analyst: `{"action":"post_analysis","marketId":"M1","probability":72,"confidence":"high","method":"Spread-implied: LAL @ BOS, spread -5.5","category":"sports_game","summary":"Lakers favored by 5.5 at home, historical spread conversion gives 72%."}
+{"action":"research","query":"BTC volatility 30d","source":"web"}
+{"action":"speak","message":"My model puts this at 38% — pricers are too high.","emotion":"neutral"}
 {"action":"idle"}`,
 };
 
@@ -580,11 +645,16 @@ export function buildPortfolioReviewPrompt(agent: AgentState): string {
   const balance = agent.usdcBalance ?? 0;
   parts.push(`\nUSDC BALANCE (buying power): $${balance.toFixed(2)}`);
 
-  // Positions with current fair values, time decay, and book data
-  if (agent.positions && agent.positions.length > 0) {
+  // Positions with current fair values, time decay, and book data (skip resolved)
+  const activePositions = (agent.positions || []).filter(p => {
+    if (p.size <= 0) return false;
+    const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
+    if (m && (m.resolutionStatus === "pending" || m.apiStatus === "pending" || m.apiStatus === "closed")) return false;
+    return true;
+  });
+  if (activePositions.length > 0) {
     parts.push("\nYOUR POSITIONS:");
-    for (const p of agent.positions) {
-      if (p.size <= 0) continue;
+    for (const p of activePositions) {
       const m = state.markets.get(p.marketId) || state.getMarketByApiId(p.marketId);
       const question = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 80) : p.marketId;
       const currentFV = m?.fairValue !== null && m?.fairValue !== undefined ? Math.round(m.fairValue * 100) : null;
@@ -619,7 +689,6 @@ export function buildPortfolioReviewPrompt(agent: AgentState): string {
             statusTag = ` ⏰${Math.round(remaining / 86400_000)}d`;
           }
         }
-        if (m.resolutionStatus === "pending" || m.apiStatus === "pending") statusTag += " 🔴RESOLVING";
       }
 
       // Book data for exit assessment
@@ -636,10 +705,15 @@ export function buildPortfolioReviewPrompt(agent: AgentState): string {
     parts.push("\nNO POSITIONS.");
   }
 
-  // Open orders with current fair values and distance assessment
-  if (agent.openOrders && agent.openOrders.length > 0) {
+  // Open orders with current fair values and distance assessment (skip resolved)
+  const activeOrders = (agent.openOrders || []).filter(o => {
+    const m = state.markets.get(o.marketId);
+    if (m && (m.resolutionStatus === "pending" || m.apiStatus === "pending" || m.apiStatus === "closed")) return false;
+    return true;
+  });
+  if (activeOrders.length > 0) {
     parts.push("\nYOUR OPEN ORDERS:");
-    for (const o of agent.openOrders) {
+    for (const o of activeOrders) {
       const m = state.markets.get(o.marketId);
       const question = m ? m.question.replace(/^Will\s+/i, "").replace(/\?$/, "").slice(0, 80) : o.marketId;
       const currentFV = m?.fairValue !== null && m?.fairValue !== undefined ? Math.round(m.fairValue * 100) : null;
@@ -657,9 +731,7 @@ export function buildPortfolioReviewPrompt(agent: AgentState): string {
       // Time decay flag for orders
       let statusTag = "";
       if (m) {
-        if (m.resolutionStatus === "pending" || m.apiStatus === "pending") statusTag = " 🔴RESOLVING→CANCEL";
-        else if (m.apiStatus === "closed") statusTag = " 🔴CLOSED→CANCEL";
-        else if (m.deadline) {
+        if (m.deadline) {
           const remaining = new Date(m.deadline).getTime() - Date.now();
           if (remaining <= 0) statusTag = " ⏰EXPIRED→CANCEL";
           else if (remaining < 3600_000) statusTag = ` ⏰${Math.round(remaining / 60_000)}min left — reprice for time decay`;
@@ -682,8 +754,8 @@ export function buildPortfolioReviewPrompt(agent: AgentState): string {
 
   // Oracle summaries + price history for context
   const relevantMarketIds = new Set([
-    ...(agent.positions || []).map((p) => p.marketId),
-    ...(agent.openOrders || []).map((o) => o.marketId),
+    ...activePositions.map((p) => p.marketId),
+    ...activeOrders.map((o) => o.marketId),
   ]);
   const oracleSummaries: string[] = [];
   for (const id of relevantMarketIds) {

@@ -1,4 +1,4 @@
-export type AgentRole = "creator" | "pricer" | "trader";
+export type AgentRole = "creator" | "pricer" | "trader" | "analyst" | "bartender";
 
 export type RealBuilding = "newsroom" | "workshop" | "exchange" | "pit" | "lounge";
 export type PathLocation = "path_left" | "path_center" | "path_right";
@@ -197,4 +197,41 @@ export const TRADERS: AgentConfig[] = [
   },
 ];
 
-export const ALL_AGENTS: AgentConfig[] = [...CREATORS, ...PRICERS, ...TRADERS];
+export const BARTENDER: AgentConfig = {
+  id: "barkeep",
+  name: "Barkeep",
+  role: "bartender",
+  color: "#a16207",
+  accentColor: "#713f12",
+  personality: "Warm, knows everyone's name. Great listener. Brings up random non-market topics to keep the lounge lively.",
+  specialty: "Conversation starter, mixologist, town gossip",
+  moveSpeed: 0,
+  spriteFeatures: { size: "large" },
+};
+
+export const ANALYSTS: AgentConfig[] = [
+  {
+    id: "sigma",
+    name: "Sigma",
+    role: "analyst",
+    color: "#34d399",
+    accentColor: "#059669",
+    personality: "Numbers-driven and precise. Speaks in probabilities. Dry humor.",
+    specialty: "Crypto prices, stocks, economic indicators",
+    moveSpeed: 55,
+    spriteFeatures: { glasses: true, size: "medium", hairStyle: "slicked" },
+  },
+  {
+    id: "edge",
+    name: "Edge",
+    role: "analyst",
+    color: "#a3e635",
+    accentColor: "#65a30d",
+    personality: "Sharp and opinionated. Loves being right. References historical patterns.",
+    specialty: "Sports games, futures, politics, weather",
+    moveSpeed: 65,
+    spriteFeatures: { hat: "beret", size: "medium" },
+  },
+];
+
+export const ALL_AGENTS: AgentConfig[] = [...CREATORS, ...PRICERS, ...TRADERS, ...ANALYSTS, BARTENDER];
