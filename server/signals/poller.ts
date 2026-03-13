@@ -1,7 +1,7 @@
 /**
  * News system — two layers:
  *
- * 1. BRIEFING (every 30 min): Wide editorial scan across 18+ sources.
+ * 1. BRIEFING (every 20 min): Wide editorial scan across 18+ sources.
  *    One LLM call produces 15-25 stories. Cached in state.dailyBriefing.
  *    Agents see this as their "TODAY'S BRIEFING" in prompts.
  *
@@ -33,8 +33,9 @@ import { isContextEnabled } from "../context-api/client";
 const timers: ReturnType<typeof setInterval>[] = [];
 const timeouts: ReturnType<typeof setTimeout>[] = [];
 
-// Track previous scores for change detection
+// Track previous scores and status for change detection
 let prevScores = new Map<string, string>();
+let prevStatus = new Map<string, string>(); // track statusDetail for period transitions
 // Track seen X post IDs (prevent re-processing same post)
 const seenPostIds = new Set<string>();
 
@@ -42,7 +43,7 @@ export function startPoller(): void {
   console.log("[Poller] Starting news system (briefing + real-time + breaking)...");
 
   // ── Briefing (every 30 min) ──
-  scheduleLoop("briefing", runBriefing, 5_000, 30 * 60_000);
+  scheduleLoop("briefing", runBriefing, 5_000, 20 * 60_000);
 
   // ── Real-time structured feeds ──
   scheduleLoop("espn-daily-slate", refreshSportsSlate, 0, 4 * 60 * 60_000);      // every 4h
@@ -199,15 +200,53 @@ async function refreshLiveScores(): Promise<void> {
     const key = game.id;
     const scoreStr = `${game.awayScore}-${game.homeScore}`;
     const prev = prevScores.get(key);
+    const prevStat = prevStatus.get(key);
 
     if (game.status === "post" && prev !== "final") {
-      // Game just ended — BREAKING (fires exactly once per game ID)
+      // Game just ended — BREAKING
       const headline = `Final: ${game.shortName} ${game.awayScore}-${game.homeScore}`;
       emitBreaking(`game-final-${game.id}`, headline, "ESPN", "Sports");
       prevScores.set(key, "final");
-    } else if (game.status === "in" && prev !== scoreStr) {
+      prevStatus.set(key, "final");
+    } else if (game.status === "in") {
+      // ── Live game updates ──
+      const detail = game.statusDetail || "";
+
+      // Period transitions (halftime, end of quarter/period)
+      if (detail !== prevStat && detail) {
+        const isHalftime = /half/i.test(detail);
+        const isPeriodEnd = /end of/i.test(detail);
+
+        if (isHalftime) {
+          emitBreaking(
+            `game-half-${game.id}`,
+            `Halftime: ${game.shortName} ${game.awayScore}-${game.homeScore}`,
+            "ESPN", "Sports"
+          );
+        } else if (isPeriodEnd) {
+          emitBreaking(
+            `game-period-${game.id}-${detail.replace(/\s+/g, "")}`,
+            `${detail}: ${game.shortName} ${game.awayScore}-${game.homeScore}`,
+            "ESPN", "Sports"
+          );
+        }
+      }
+
+      // Close game alert — margin ≤5 in second half (fires once per game)
+      if (game.awayScore !== null && game.homeScore !== null) {
+        const margin = Math.abs(game.awayScore - game.homeScore);
+        const isLate = /4th|3rd|OT|2nd half|final/i.test(detail);
+        if (margin <= 5 && isLate) {
+          emitBreaking(
+            `game-close-${game.id}`,
+            `Close game: ${game.shortName} ${game.awayScore}-${game.homeScore} (${detail})`,
+            "ESPN", "Sports"
+          );
+        }
+      }
+
       prevScores.set(key, scoreStr);
-      // In-game updates stored as state only, no headlines
+      prevStatus.set(key, detail);
     }
   }
 

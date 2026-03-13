@@ -122,12 +122,17 @@ export function buildUserPrompt(
     }
   }
 
-  // Daily briefing — wide editorial scan, refreshed every 30 min
+  // Daily briefing — wide editorial scan, refreshed every 20 min
   const briefing = state.dailyBriefing;
   if (briefing && briefing.items.length > 0) {
     const ago = Math.round((Date.now() - briefing.generatedAt) / 60_000);
-    parts.push(`\nTODAY'S BRIEFING (updated ${ago} min ago):`);
-    for (const item of briefing.items) {
+    // Show high-marketability items first, then cap total to avoid prompt bloat
+    const sorted = [...briefing.items].sort((a, b) =>
+      (b.marketability === "high" ? 1 : 0) - (a.marketability === "high" ? 1 : 0)
+    );
+    const shown = sorted.slice(0, 12); // cap at 12 most relevant
+    parts.push(`\nTODAY'S BRIEFING (${ago}m ago):`);
+    for (const item of shown) {
       const mTag = item.marketability === "high" ? " ★" : "";
       parts.push(`- [${item.category}] ${item.headline}${mTag}`);
     }
@@ -145,31 +150,54 @@ export function buildUserPrompt(
     }
   }
 
-  // Sports slate — creators get the full slate, pricers/traders get relevant games
+  // Sports slate — live games shown to ALL agents, full slate for creators
   if (sportsSlate && sportsSlate.length > 0) {
-    if (agent.role === "creator") {
-      parts.push("\nTODAY'S GAME SLATE (create markets for specific games!):");
-      for (const g of sportsSlate.slice(0, 15)) {
+    // Live games first — everyone should know what's happening right now
+    const liveGames = sportsSlate.filter((g) => g.status === "in");
+    if (liveGames.length > 0) {
+      parts.push("\n🏀 LIVE RIGHT NOW:");
+      for (const g of liveGames.slice(0, 8)) {
         const odds = g.spread ? ` (spread: ${g.spread > 0 ? "+" : ""}${g.spread})` : "";
-        parts.push(`- [${g.league.toUpperCase()}] ${g.shortName} — ${g.status === "pre" ? g.startTime : g.statusDetail}${odds}`);
+        parts.push(`- [${g.league.toUpperCase()}] ${g.shortName} ${g.awayScore}-${g.homeScore} — ${g.statusDetail}${odds}`);
+      }
+    }
+
+    // Recently finished games (last hour)
+    const recentFinals = sportsSlate.filter((g) => g.status === "post");
+    if (recentFinals.length > 0) {
+      parts.push("\nFINAL SCORES:");
+      for (const g of recentFinals.slice(0, 6)) {
+        parts.push(`- [${g.league.toUpperCase()}] ${g.shortName} ${g.awayScore}-${g.homeScore} (Final)`);
+      }
+    }
+
+    if (agent.role === "creator") {
+      // Upcoming games for market creation
+      const upcoming = sportsSlate.filter((g) => g.status === "pre");
+      if (upcoming.length > 0) {
+        parts.push("\nUPCOMING GAMES (create markets for these!):");
+        for (const g of upcoming.slice(0, 10)) {
+          const odds = g.spread ? ` (spread: ${g.spread > 0 ? "+" : ""}${g.spread})` : "";
+          parts.push(`- [${g.league.toUpperCase()}] ${g.shortName} — ${g.startTime}${odds}`);
+        }
       }
     } else if (agent.role === "pricer" || agent.role === "trader") {
-      // Show games relevant to active sports markets
+      // Also show games relevant to active sports markets that aren't live
       const sportsMarketText = markets
         .filter((m) => m.question && /\b(beat|win|score|spread|goal|touchdown|point|game)\b/i.test(m.question))
         .map((m) => m.question.toLowerCase())
         .join(" ");
       if (sportsMarketText) {
-        const relevantGames = sportsSlate.filter((g) => {
+        const relevantUpcoming = sportsSlate.filter((g) => {
+          if (g.status === "in" || g.status === "post") return false; // already shown above
           const gText = `${g.shortName} ${g.homeTeam} ${g.awayTeam}`.toLowerCase();
           return sportsMarketText.split(/\s+/).some((w) => w.length > 3 && gText.includes(w));
         });
-        if (relevantGames.length > 0) {
-          parts.push("\nRELEVANT GAMES (for your sports markets — use live scores/status for pricing):");
-          for (const g of relevantGames.slice(0, 8)) {
+        if (relevantUpcoming.length > 0) {
+          parts.push("\nUPCOMING (relevant to your markets):");
+          for (const g of relevantUpcoming.slice(0, 5)) {
             const odds = g.spread ? ` (spread: ${g.spread > 0 ? "+" : ""}${g.spread})` : "";
-            const score = g.status === "in" ? ` ${g.awayScore}-${g.homeScore}` : "";
-            parts.push(`- [${g.league.toUpperCase()}] ${g.shortName}${score} — ${g.status === "pre" ? g.startTime : g.statusDetail}${odds}`);
+            parts.push(`- [${g.league.toUpperCase()}] ${g.shortName} — ${g.startTime}${odds}`);
           }
         }
       }
